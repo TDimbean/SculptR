@@ -1,0 +1,21 @@
+schema_version = "1.0.0"
+id = "sculptr"
+version = "0.1.0"
+name = "SculptR"
+tagline = "Generate and enhance 3D models with local AI runtimes"
+maintainer = "SculptR contributors"
+type = "add-on"
+blender_version_min = "4.2.1"
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+network = "Download user-approved model files from Hugging Face"
+files = "Read inputs and store models, job state, and generated meshes"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  ".git",
+  "*.zip",
+  "tests/",
+]
