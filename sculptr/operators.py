@@ -183,6 +183,22 @@ class SCULPTR_OT_open_models_folder(bpy.types.Operator):
         return bpy.ops.wm.path_open(filepath=str(directory))
 
 
+class SCULPTR_OT_open_diagnostics(bpy.types.Operator):
+    bl_idname = "sculptr.open_diagnostics"
+    bl_label = "Open Diagnostics"
+    bl_description = "Open the folder with engine logs, bridge logs, and archived job records"
+
+    def execute(self, context):
+        snapshot = get_client(context).snapshot() or {}
+        logs = Path(str(read_field(snapshot, "log_path", ""))).parent
+        archive = Path(str(read_field(snapshot, "jobs_path", "")))
+        target = logs if logs.is_dir() else archive
+        if not target.is_dir():
+            self.report({"ERROR"}, "Diagnostics have not been written yet")
+            return {"CANCELLED"}
+        return bpy.ops.wm.path_open(filepath=str(target))
+
+
 class SCULPTR_OT_model_action(bpy.types.Operator):
     bl_idname = "sculptr.model_action"
     bl_label = "Model Action"
@@ -383,6 +399,7 @@ CLASSES = (
     SCULPTR_FH_image_drop,
     SCULPTR_OT_change_models_folder,
     SCULPTR_OT_open_models_folder,
+    SCULPTR_OT_open_diagnostics,
     SCULPTR_OT_model_action,
     SCULPTR_OT_cancel_job,
     SCULPTR_OT_generate,

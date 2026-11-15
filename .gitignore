@@ -1,7 +1,11 @@
-# Tests
-tests/
+# Python bytecode
+__pycache__/
+*.py[cod]
 
 # Markdown documentation
 STRATEGY.md
 AGENTS.md
 /Constitution
+
+# Release
+*.zip

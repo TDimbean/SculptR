@@ -24,9 +24,11 @@ def unregister():
 
     stop_runtime_poll()
     try:
-        from .bridge import get_client
+        # `stop` must not re-configure: a disabled add-on may never start a new
+        # engine, it only has to shut the current one down cleanly.
+        from .bridge import stop as stop_bridge
 
-        get_client(bpy.context).stop()
+        stop_bridge()
     except Exception:
         pass
     unregister_properties()

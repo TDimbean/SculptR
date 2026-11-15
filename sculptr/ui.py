@@ -117,6 +117,38 @@ def _model_id_containing(text):
     return ""
 
 
+def _engine_failure():
+    failure = _SNAPSHOT.get("failure") if isinstance(_SNAPSHOT, Mapping) else None
+    return failure if isinstance(failure, Mapping) else None
+
+
+def _draw_engine_status(layout):
+    """Say whether the engine is alive and where its diagnostics live."""
+    alive = bool(read_field(_SNAPSHOT, "engine_alive", False))
+    pid = read_field(_SNAPSHOT, "engine_pid", None)
+    label = "Engine running" if alive else "Engine stopped"
+    if pid:
+        label = f"{label} (pid {pid})"
+    row = layout.row()
+    row.alert = not alive
+    row.label(text=label, icon="CHECKMARK" if alive else "ERROR")
+    layout.operator("sculptr.open_diagnostics", text="Open Diagnostics", icon="FILE_FOLDER")
+
+
+def _draw_engine_failure(layout):
+    """Surface the recorded engine death instead of leaving it inside a log."""
+    failure = _engine_failure()
+    if failure is None:
+        return
+    box = layout.box()
+    box.alert = True
+    box.label(text=str(read_field(failure, "message", "SculptR engine stopped")), icon="ERROR")
+    reason = str(read_field(failure, "reason", ""))
+    if reason:
+        box.label(text=f"Reason: {reason}", icon="INFO")
+    box.operator("sculptr.open_diagnostics", text="Open Diagnostics", icon="FILE_FOLDER")
+
+
 def _model_installed(model_id):
     return bool(model_id) and normalize_status(find_model_state(_SNAPSHOT, model_id).get("status")) == "installed"
 
@@ -169,6 +201,7 @@ class SCULPTR_PT_root(_SculptRPanel, bpy.types.Panel):
             error = layout.box()
             error.alert = True
             error.label(text=_RUNTIME_ERROR, icon="ERROR")
+        _draw_engine_failure(layout)
 
 
 class SCULPTR_PT_image(_SculptRChildPanel, bpy.types.Panel):
@@ -349,6 +382,7 @@ class SCULPTR_PT_folder(_SculptRChildPanel, bpy.types.Panel):
         path_row.enabled = False
         path_row.prop(preferences, "models_directory", text="", icon="FILE_FOLDER")
         layout.label(text=storage_label(_SNAPSHOT))
+        _draw_engine_status(layout)
 
         buttons = layout.row(align=True)
         change = buttons.column()
