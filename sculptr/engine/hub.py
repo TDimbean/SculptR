@@ -12,6 +12,13 @@ Two rules dominate this module.
    `416` never deletes the saved prefix. Restarting from byte zero is an
    explained exception, not normal recovery.
 
+3. A digest is used only for what it actually hashes. `blobId` is the SHA-1 of a
+   git blob, and for a file stored in LFS or XET that blob is the pointer text,
+   not the content, so such a file is verified by `lfs.sha256` — the SHA-256 of
+   the served bytes — and its pointer hash is dropped rather than carried as a
+   digest that could never match. An always-failing check is not harmless: it
+   quarantines a complete payload and restarts it from byte zero forever.
+
 One `RetryController` per transfer owns backoff, `Retry-After`, the no-progress
 window, and the CDN-authorization budget. Nothing else retries.
 """
@@ -260,6 +267,27 @@ def _retry_after(headers: Any) -> float | None:
     return max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
 
 
+def _lfs_content_digest(pointer: Any) -> str | None:
+    """SHA-256 of the content an LFS/XET pointer stands for, or None.
+
+    A stored file's git blob carries only the pointer text, so the metadata's
+    `blobId` describes the pointer, never the served bytes. `lfs.sha256` (named
+    `lfs.oid` by the tree form of the same API) is the SHA-256 of the content the
+    CDN serves for that pointer, which is why it is the only digest that can
+    verify a stored file. The value is shape-checked: a field that is not a bare
+    SHA-256 is treated as no digest at all, never as a digest to trust.
+    """
+    if not isinstance(pointer, dict):
+        return None
+    value = pointer.get("sha256") or pointer.get("oid")
+    if not isinstance(value, str):
+        return None
+    digest = value.strip().lower()
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        return None
+    return digest
+
+
 class _RestrictedRedirectHandler(urllib.request.HTTPRedirectHandler):
     def __init__(self, allowed_hosts: frozenset[str]):
         self.allowed_hosts = allowed_hosts
@@ -323,7 +351,17 @@ class HubClient:
                 if not repository.accepts(remote_path, available):
                     continue
                 selected_paths.add(remote_path)
-                files.append(self._remote_file(repository, sibling, required.get(remote_path)))
+                remote = self._remote_file(repository, sibling, required.get(remote_path))
+                if not remote.sha256 and not remote.git_sha1:
+                    # No digest can prove these bytes belong to the revision, so
+                    # they are transferred but never claimed as verified. The run
+                    # says so instead of pretending the install was checked.
+                    self.log_event(
+                        "manifest_without_digest",
+                        path=remote_path,
+                        note="no content digest available for this revision",
+                    )
+                files.append(remote)
             missing = set(required) - selected_paths
             if missing:
                 raise HubError(
@@ -378,8 +416,24 @@ class HubClient:
         relative = PurePosixPath(remote_path)
         local_path = relative.as_posix() if not prefix else f"{prefix}/{relative.as_posix()}"
         blob_id = sibling.get("blobId")
+        pointer = sibling.get("lfs")
         declared = rule.sha256 if rule is not None else None
-        quoted = urllib.parse.quote(remote_path, safe="/")
+        content_sha256 = _lfs_content_digest(pointer)
+        pointer_size = pointer.get("size") if isinstance(pointer, dict) else None
+        if isinstance(pointer_size, int) and pointer_size != size:
+            raise HubError(
+                f"Manifest size {size} for {remote_path} disagrees with its LFS pointer size {pointer_size}"
+            )
+        if declared and content_sha256 and declared != content_sha256:
+            # The catalog pin and the pinned revision disagree about the same file.
+            # Saying it here costs no bandwidth and no bytes; discovering it at the
+            # end of a multi-gigabyte transfer turns one bad digest into a payload
+            # that quarantines and restarts from zero, forever.
+            raise HubError(
+                f"Pinned digest for {remote_path} disagrees with "
+                f"{repository.repo_id}@{repository.revision}"
+            )
+        declared = declared or content_sha256
         return RemoteFile(
             repo_id=repository.repo_id,
             revision=repository.revision,
@@ -387,7 +441,13 @@ class HubClient:
             local_path=local_path,
             size=size,
             sha256=declared,
-            git_sha1=blob_id if isinstance(blob_id, str) and not declared else None,
+            # `blobId` is the SHA-1 of the git blob. For a file stored in LFS or
+            # XET that blob holds only the pointer text (a hundred-odd bytes), so
+            # its hash belongs to the pointer and can never match the served
+            # content; verifying a payload against it failed always, and every
+            # failure restarted the transfer from byte zero. A pointer-bearing
+            # file is therefore verified by its content SHA-256, or not at all.
+            git_sha1=blob_id if isinstance(blob_id, str) and not declared and not isinstance(pointer, dict) else None,
         )
 
     def _open(

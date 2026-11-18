@@ -387,7 +387,9 @@ The current implementation includes several defensive checks:
 
 - Model repositories are pinned to explicit revisions.
 - Required files can be pinned to SHA-256 values.
-- Other Hugging Face files are checked against metadata-provided hashes where available.
+- A file that the repository stores without a pointer is checked against the metadata's Git blob SHA-1, which is the hash of `blob <size>\0` followed by the served bytes.
+- A file stored behind an LFS or XET pointer has no content blob: its Git blob holds only the ~135-byte pointer text, so that hash says nothing about the served bytes. Such a file is checked against the pointer's SHA-256, which is the hash of the content itself; its blob hash is never used as a content digest.
+- A catalog pin that the pinned revision's own content hash contradicts is refused before any byte is downloaded.
 - Downloads use `.part` files and staged directories before final installation.
 - Redirects from the default Hugging Face endpoint are restricted to HTTPS hosts under `huggingface.co` or `hf.co`.
 - Model, cache, and output paths are checked to prevent directory traversal.

@@ -59,11 +59,22 @@ class ModelSpec:
     dependencies: tuple[str, ...] = ()
 
 
+# The two checkpoints are stored in XET, so their git blob hash describes the
+# LFS pointer text and can say nothing about the bytes served. What is pinned is
+# the SHA-256 of the content at this exact revision, measured from the CDN on
+# 2026-11-18: a disagreement is then settled from metadata, before 8 GB is moved,
+# instead of after a payload has already been written and quarantined.
 HUNYUAN_FILES = (
     FileRule("hunyuan3d-dit-v2-1/config.yaml"),
-    FileRule("hunyuan3d-dit-v2-1/model.fp16.ckpt"),
+    FileRule(
+        "hunyuan3d-dit-v2-1/model.fp16.ckpt",
+        "6b519fc7242f78e9b5f47ea4d55668fe3d944a2d27332f4ca68d29a6ff603f5e",
+    ),
     FileRule("hunyuan3d-vae-v2-1/config.yaml"),
-    FileRule("hunyuan3d-vae-v2-1/model.fp16.ckpt"),
+    FileRule(
+        "hunyuan3d-vae-v2-1/model.fp16.ckpt",
+        "5cbe97f25e6e7abd4bccc80ab07524ec0c86d24118486a9ba49bb5dfb070288a",
+    ),
     FileRule("LICENSE"),
     FileRule("Notice.txt"),
     FileRule("README.md"),

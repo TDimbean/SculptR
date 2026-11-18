@@ -205,3 +205,34 @@
 - Update superseding p9mc's note: `graphify update .` no longer refuses on this tree -- it rebuilt
   to 971 nodes / 2603 edges / 47 communities after the first ui.py edit, then 964 / 2588 / 45 once
   `_wrap_text` was deleted.
+
+## 2026-11-18 (session 2026-11-18-kv8x)
+
+- Decision: a pointer-stored file (LFS or XET) is verified with `lfs.sha256`, the SHA-256 of the
+  served content, and its `blobId` is never carried as a digest. WHY: `blobId` is the SHA-1 of the
+  git blob, and for such a file the blob is the ~135-byte pointer text -- the checkpoint's
+  `blobId` `3dd05dc4116bcbb36a6d82d6431abca613c035dc` is sha1 of `blob 135\0` + pointer, while
+  `file_digest` hashes `blob 7366389768\0` + served bytes, so the comparison can never hold. An
+  always-failing check is not benign: `_finish_payload` quarantines a COMPLETE payload, raises
+  `_IntegrityRestart`, `download_model` re-downloads from byte zero, and the user sees the progress
+  reach ~100% then restart, forever. `lfs.sha256` was proven to be the content hash for both storage
+  backends on this pinned revision (XET file streamed in full: 334,707,217 bytes ->
+  `1b4889b6...` == `lfs.sha256`; and both checkpoints hashed end to end, dit `6b519fc7...` over
+  7,366,389,768 bytes, vae `5cbe97f2...` over 655,648,152). A plain file still uses the git blob
+  hash, which does describe its content (`LICENSE`: blob sha1 `d875bf81...` == its `blobId`).
+- Decision: those two measured SHA-256s are pinned in `HUNYUAN_FILES` (catalog.py) in ADDITION to
+  the resolver fix, and `_remote_file` refuses a catalog pin the pinned revision contradicts
+  before requesting a byte. WHY: fail-fast before 8 GB is moved matches the existing `hunyuan_mv`
+  precedent, and turns a bad digest into one instant `HubError` instead of a written-and-quarantined
+  payload plus a full second pass.
+- Gotcha: the pinned-revision API (`/api/models/{repo}/revision/{rev}?blobs=true`) names the content
+  hash `lfs.sha256`; the tree form (`/api/models/{repo}/tree/main/...`) names the same value
+  `lfs.oid`. Also `blobId`, not `oid`, is the sibling field in the revision form.
+- Dead end (do not repeat): do not "fix" this by weakening `integrity_retry` /
+  `_IntegrityRestart` / `retry_allowed`, or by skipping verification. The one-retry-then-`IntegrityError`
+  shape is the invariant; the loop disappeared because the digest became the right one.
+- Pointers: probes that proved all of the above live in `unsloth-tmp/` (gitignored):
+  `lfs_probe.py` (pointer reconstruction), `xet_probe.py` (single XET file streamed),
+  `hunyuan_digest_probe.py` (both checkpoints hashed), `hub_copy_probe.py` (the fix exercised inside
+  the INSTALLED copy Blender loads). Test-side: `ServerBehaviour(stored_as_pointer=True)` in
+  `tests/support.py` makes the fake CDN report a pointer sibling exactly as the real API does.

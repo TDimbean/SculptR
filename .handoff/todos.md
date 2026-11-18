@@ -21,6 +21,30 @@
 
 ## Done
 
+- [x] T-034 Downloads that reach ~100% then restart at 0 forever -- fixed at `sculptr/engine/hub.py`.
+      Cause: `_remote_file` set `git_sha1 = sibling["blobId"]` for every file and ignored
+      `sibling["lfs"]`, but for an LFS/XET file `blobId` is the SHA-1 of the ~135-byte POINTER text
+      (`3dd05dc4...` = sha1 of `blob 135\0` + pointer) while `file_digest` hashes
+      `blob 7366389768\0` + served bytes, so verification of the checkpoint failed always:
+      quarantine -> `_IntegrityRestart` -> `download_model` re-download from byte 0 ->
+      `IntegrityError`. Engine.log evidence: `partial_quarantined ... bytes=7366389768
+      moved_to=model.fp16.ckpt.part.unverified-1794950708`, then `download_progress offset=33554432`
+      from zero. Fix: new `_lfs_content_digest` (`lfs.sha256` or the tree-API `lfs.oid`, 64-hex
+      checked, else no digest); `_remote_file` uses it as `sha256`, refuses a pointer size that
+      disagrees with the manifest size, refuses a catalog pin the pinned revision contradicts
+      BEFORE requesting a byte, and carries `blobId` as `git_sha1` only for a file with no pointer
+      and no content digest. Proven by hashing the served bytes: both checkpoints' content SHA-256
+      equals their `lfs.sha256` (dit `6b519fc7...`, 7,366,389,768 bytes; vae `5cbe97f2...`,
+      655,648,152 bytes), so those values are now pinned in `HUNYUAN_FILES`. Docs: README-2.md
+      safeguards section and the `hub.py` docstring now state the digest rules. New
+      `tests/test_hub_manifest.py` (5 cases) + `ServerBehaviour.stored_as_pointer` in the fake CDN.
+      Suite Ran 80, 0 failed (baseline 75); `compileall` exit 0; Blender 5.2.3 batch imports the
+      INSTALLED copy and prints `resolved git_sha1: None`, clean quit, crash mtime still 08:32:29;
+      installed `%APPDATA%` copy re-synced (`hub.py` 492041DAD72B..., `catalog.py` 23BA4D407E7A...
+      both trees); `graphify update .` 1007 nodes / 2685 edges / 49 communities. NOT verified: a
+      live 7.37 GB install through the engine (needs Blender + bandwidth). Details:
+      `.handoff/log/2026-11-18-kv8x.md` 12:48.
+
 - [x] T-033 Stall/failure notices no longer move the card -- the "connection ended at ..."
       row flickered in and out and slid the progress bar and buttons one line. Cause:
       the reason was drawn by `if error_code: card.label(...)` (model card, `ui.py:579`) and

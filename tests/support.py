@@ -33,12 +33,38 @@ class ServerBehaviour:
     retry_after: str | None = None
     abort_after: int = 0
     chunk: int = 65_536
+    stored_as_pointer: bool = False
+    pointer_sha256: str | None = None
     requests: list[dict[str, Any]] = field(default_factory=list)
     aborted: int = 0
 
     @property
     def sha256(self) -> str:
         return hashlib.sha256(self.data).hexdigest()
+
+    @property
+    def pointer_digest(self) -> str:
+        """The SHA-256 the pointer claims for the content, defaulting to honest."""
+        return (self.pointer_sha256 or self.sha256).lower()
+
+    @property
+    def pointer_text(self) -> bytes:
+        return (
+            "version https://git-lfs.github.com/spec/v1\n"
+            f"oid sha256:{self.pointer_digest}\n"
+            f"size {len(self.data)}\n"
+        ).encode("utf-8")
+
+    @property
+    def pointer_blob(self) -> str:
+        """The git blob SHA-1 of an LFS pointer, the way the real API spells it.
+
+        A pointer-stored file has no content blob: its git blob is the pointer
+        text, so this hash belongs to a hundred-odd bytes of metadata and can
+        never describe the served body.
+        """
+        pointer = self.pointer_text
+        return hashlib.sha1(f"blob {len(pointer)}\0".encode("utf-8") + pointer).hexdigest()
 
 
 def _handler_class(behaviour: ServerBehaviour):
@@ -59,17 +85,23 @@ def _handler_class(behaviour: ServerBehaviour):
             self._blob()
 
         def _metadata(self) -> None:
-            payload = json.dumps(
-                {
-                    "siblings": [
-                        {
-                            "rfilename": REMOTE_PATH,
-                            "size": len(behaviour.data),
-                            "blobId": hashlib.sha1(behaviour.data).hexdigest(),
-                        }
-                    ]
+            sibling = {
+                "rfilename": REMOTE_PATH,
+                "size": len(behaviour.data),
+                # The git blob SHA-1 of the content, the way the API reports a
+                # file that is stored without a pointer.
+                "blobId": hashlib.sha1(
+                    f"blob {len(behaviour.data)}\0".encode("utf-8") + behaviour.data
+                ).hexdigest(),
+            }
+            if behaviour.stored_as_pointer:
+                sibling["blobId"] = behaviour.pointer_blob
+                sibling["lfs"] = {
+                    "sha256": behaviour.pointer_digest,
+                    "size": len(behaviour.data),
+                    "pointerSize": len(behaviour.pointer_text),
                 }
-            ).encode("utf-8")
+            payload = json.dumps({"siblings": [sibling]}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -152,16 +184,35 @@ def serve(behaviour: ServerBehaviour) -> Iterator[str]:
         thread.join(timeout=5.0)
 
 
-def spec(data: bytes, *, model_id: str = "test-model", target_prefix: str = ""):
-    """A catalog spec whose single pinned file carries the digest of `data`."""
+def spec(
+    data: bytes,
+    *,
+    model_id: str = "test-model",
+    target_prefix: str = "",
+    pinned: bool | str = True,
+):
+    """A catalog spec for `data`; `pinned` says which digest the catalog claims.
+
+    `True` pins the digest of `data`, `False` leaves the file unpinned so its
+    digest has to come from the revision metadata (how the Hunyuan checkpoints
+    are declared), and a 64-character string pins that digest instead, which is
+    how a catalog and a pinned revision are made to disagree.
+    """
     from sculptr.catalog import FileRule, ModelSpec, RepositorySpec
+
+    if pinned is True:
+        digest = hashlib.sha256(data).hexdigest()
+    elif pinned is False:
+        digest = None
+    else:
+        digest = pinned
 
     repository = RepositorySpec(
         repo_id=REPO,
         revision=REVISION,
         target_prefix=target_prefix,
         include=(REMOTE_PATH,),
-        files=(FileRule(REMOTE_PATH, hashlib.sha256(data).hexdigest()),),
+        files=(FileRule(REMOTE_PATH, digest),),
     )
     return ModelSpec(
         model_id=model_id,

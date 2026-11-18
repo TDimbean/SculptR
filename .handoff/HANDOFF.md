@@ -18,7 +18,23 @@
 
 ## Status
 
-- **Last updated:** 2026-11-18 11:26 -- session 2026-11-18-n6rq (transfer notices now hold a reserved line above the progress bar, so nothing slides)
+- **Last updated:** 2026-11-18 12:48 -- session 2026-11-18-kv8x (downloads no longer restart at zero near completion: an LFS/XET file verifies with its pointer SHA-256, not the pointer's blob hash)
+- **Downloads, digest kind (kv8x, T-034):** an LFS/XET-stored file has no content blob -- its git blob is the ~135-byte
+  pointer text, so `blobId` describes metadata and can never match the payload. `_remote_file` used to carry it
+  as `git_sha1` for EVERY file, so the 7,366,389,768-byte Hunyuan checkpoint failed verification always:
+  quarantine, `_IntegrityRestart`, `download_model` re-download from byte 0 -- the user-visible "reaches ~100%
+  then starts again at 0, never completes". Fix is at the manifest layer (`sculptr/engine/hub.py`): new
+  `_lfs_content_digest` (`lfs.sha256`, tree-API spelling `lfs.oid`, 64-hex checked) becomes the content pin,
+  `blobId` is kept only for a file with no pointer and no content digest, a pointer/manifest size disagreement
+  and a pin the revision contradicts are refused BEFORE any byte is requested, and `resolve_model` logs
+  `manifest_without_digest` when a file ends with no digest. Both checkpoints' content SHA-256s were measured
+  by streaming the served bytes and are now pinned in `HUNYUAN_FILES`. Docs accurate: README-2.md safeguards
+  + `hub.py` docstring. Suite Ran **80, 0 failed** (baseline 75; `tests/test_hub_manifest.py` +
+  `ServerBehaviour.stored_as_pointer` in the fake CDN); `compileall` exit 0; Blender 5.2.3 batch imports the
+  installed copy and prints `resolved git_sha1: None`, clean quit (crash mtime still 08:32:29); installed
+  `%APPDATA%` copy hash-equal (`hub.py` 492041DAD72B..., `catalog.py` 23BA4D407E7A...); `graphify update .`
+  = 1007 nodes / 2685 edges / 49 communities. NOT verified: a live 7.37 GB install through the engine. Details:
+  `.handoff/log/2026-11-18-kv8x.md` 12:48.
 - **Notice rows, reserved (n6rq, T-033):** the transfer reason is one row that exists every frame --
   `reason_row = card.row()` outside any condition, message in the `if`, `NOTICE_SLOT` (`ui.py:42`, `" "`) in
   the `else`, drawn under the status line and above `card.progress(...)` in both the model card and the
