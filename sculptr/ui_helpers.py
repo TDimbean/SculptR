@@ -1,13 +1,129 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .transfers import (
+    ACTIVE,
+    DISCARDED_STATE,
+    FAILED,
+    INSTALLED,
+    PAUSED_STATE,
+    QUEUED,
+    RESUMABLE_STATES,
+    RETRYING,
+    VERIFYING,
+    WAITING,
+)
 
 IMAGE_EXTENSIONS = frozenset({".jpeg", ".jpg", ".png", ".webp"})
-ACTIVE_STATUSES = frozenset({"checking", "downloading", "queued", "running"})
-TERMINAL_STATUSES = frozenset({"cancelled", "completed", "failed", "installed"})
+# The transfer journal vocabulary. `paused` is deliberately included: a paused
+# transfer still owns resumable bytes, so changing the models folder or stopping
+# the engine while it exists is exactly how a multi-GB download loses its place.
+ACTIVE_STATUSES = frozenset(
+    {
+        "checking",
+        "downloading",
+        "queued",
+        "running",
+        "retrying",
+        "waiting",
+        "verifying",
+        "paused",
+    }
+)
+# Subset that is making progress right now: progress bars, Cancel buttons.
+IN_PROGRESS_STATUSES = ACTIVE_STATUSES - {"paused"}
+# States the user reads as finished. `paused` is absent on purpose — it resumes.
+TERMINAL_STATUSES = frozenset(
+    {"cancelled", "completed", "discarded", "failed", "installed", "not_downloaded"}
+)
 IMAGE_SLOTS = ("main", "left", "right", "back")
+
+STATE_LABELS = {
+    "not_downloaded": "Not Downloaded",
+    "checking": "Checking",
+    "queued": "Queued",
+    "downloading": "Downloading",
+    "retrying": "Retrying",
+    "waiting": "Waiting for network",
+    "paused": "Paused — resume when ready",
+    "verifying": "Verifying",
+    "installed": "Installed",
+    "running": "In Progress",
+    "completed": "Completed",
+    "cancelled": "Cancelled",
+    "discarded": "Discarded",
+    "failed": "Failed",
+    "invalid": "Invalid request",
+}
+
+STATE_ICONS = {
+    "not_downloaded": "RADIOBUT_OFF",
+    "checking": "VIEWZOOM",
+    "queued": "TIME",
+    "downloading": "IMPORT",
+    "retrying": "FILE_REFRESH",
+    "waiting": "LOOP_BACK",
+    "paused": "PAUSE",
+    "verifying": "FILE_TICK",
+    "installed": "CHECKMARK",
+    "running": "TIME",
+    "completed": "CHECKMARK",
+    "cancelled": "CANCEL",
+    "discarded": "TRASH",
+    "failed": "ERROR",
+    "invalid": "ERROR",
+}
+
+# Plain-language text for the failure codes the engine writes into the journal,
+# so a stalled download says what to do instead of naming an internal reason.
+FAILURE_MESSAGES = {
+    "http_400": "The server rejected this download. Re-check the model, then Resume.",
+    "http_401": (
+        "The download link expired or the repository refused the request. "
+        "Retry or Resume; a gated repository needs access granted upstream."
+    ),
+    "http_403": (
+        "The repository refused this download. Its license and access rules apply "
+        "upstream; this add-on has nothing to accept."
+    ),
+    "http_404": "This file is no longer in the repository. Saved bytes are kept; re-check the model.",
+    "http_405": "The server does not accept this request. Saved bytes are kept.",
+    "http_410": "This file was removed from the repository. Saved bytes are kept.",
+    "http_413": "The file is too large for the server to serve in one request.",
+    "http_451": "The file is unavailable for legal reasons. Review the model's license.",
+    "license_authorization_required": (
+        "Authorization was missing on an older transfer record. Press Resume; "
+        "it states the authorization and saved bytes continue."
+    ),
+    "disk_full": "Not enough free disk space. Free space and press Resume; saved bytes stay.",
+    "disk_write": "The models folder could not be written. Check it is writable and press Resume.",
+    "integrity_mismatch": "Saved bytes did not match the pinned checksum, so this file restarts from zero.",
+    "digest_mismatch": "Saved bytes did not match the pinned checksum, so this file restarts from zero.",
+    "resume_unsupported": "This server does not support partial downloads; the next attempt restarts this file from zero.",
+    "no_progress": "No progress for a while. Bytes are saved; press Resume when the network recovers.",
+    "size_mismatch": "The saved offset is beyond the reported file size; resume re-reads the pinned manifest.",
+    "offline": "No network connection. Bytes are saved and the engine retries by itself.",
+    "dns": "The server could not be resolved. Bytes are saved and the engine retries by itself.",
+    "connect": "The server could not be reached. Bytes are saved and the engine retries by itself.",
+    "network": "The connection dropped mid-download. Bytes are saved and the engine retries by itself.",
+    "checkpoint_failed": "Progress could not be saved, so the transfer paused to avoid losing bytes.",
+    "engine_interrupted": "The engine stopped mid-download. Saved bytes resume on the next engine.",
+    "engine_stopped": "The engine stopped mid-download. Saved bytes resume on the next engine.",
+    "engine_error": "The engine hit an internal error. Saved bytes are kept; press Recover.",
+    "hub_error": "The model repository returned an unexpected error. Saved bytes are kept.",
+    "backend_failed": "The inference backend failed. Saved model bytes are unaffected.",
+    "runtime_not_installed": "The inference runtime is not installed.",
+    "io_error": "A disk or network read failed. Saved bytes are kept; press Resume.",
+    "model_busy": "This model is already being downloaded.",
+    "cache_busy": "A cache cleanup is already running.",
+    "invalid_command": "The engine rejected this request. Try again after Recover.",
+    "paused": "Paused. Saved bytes are kept.",
+    "cancelled": "Cancelled. Saved bytes stay on disk.",
+    "discarded": "Discarded. Downloaded bytes were deleted.",
+}
 
 
 def read_field(value: Any, name: str, default: Any = None) -> Any:
@@ -67,40 +183,58 @@ def normalize_status(value: Any) -> str:
         "in_progress": "running",
         "error": "failed",
         "canceled": "cancelled",
+        # Journal states that the UI renders with the job vocabulary.
+        ACTIVE: "downloading",
+        INSTALLED: "installed",
+        FAILED: "failed",
+        QUEUED: "queued",
+        RETRYING: "retrying",
+        WAITING: "waiting",
+        VERIFYING: "verifying",
+        PAUSED_STATE: "paused",
+        DISCARDED_STATE: "discarded",
+        "requested": "queued",
+        "interrupted": "paused",
+        "stopped": "paused",
     }
     return aliases.get(status, status)
 
 
-def status_label(status: Any, progress: Any = 0.0, detail: str = "") -> str:
+def retry_countdown(retry: Any = None, *, now: float | None = None) -> int | None:
+    """Seconds until the next attempt, or None when no retry is scheduled."""
+    value = retry.get("next_attempt_at") if isinstance(retry, Mapping) else retry
+    try:
+        epoch = float(value)
+    except (TypeError, ValueError):
+        return None
+    if epoch <= 0.0:
+        return None
+    return max(0, int(round(epoch - (time.time() if now is None else now))))
+
+
+def failure_message(error_code: Any, detail: str = "") -> str:
+    """Plain-language reason for a journal `error_code`, falling back to its text."""
+    code = str(error_code or "").strip().lower()
+    message = FAILURE_MESSAGES.get(code, "")
+    if message:
+        return message
+    return detail or (code.replace("_", " ").title() if code else "")
+
+
+def status_label(status: Any, progress: Any = 0.0, detail: str = "", retry: Any = None) -> str:
     normalized = normalize_status(status)
-    labels = {
-        "not_downloaded": "Not Downloaded",
-        "checking": "Checking",
-        "downloading": "Downloading",
-        "installed": "Installed",
-        "queued": "Queued",
-        "running": "In Progress",
-        "completed": "Completed",
-        "cancelled": "Cancelled",
-        "failed": "Failed",
-    }
-    label = labels.get(normalized, normalized.replace("_", " ").title())
-    if normalized in {"checking", "downloading", "running"}:
+    label = STATE_LABELS.get(normalized, normalized.replace("_", " ").title())
+    if normalized == "retrying":
+        seconds = retry_countdown(retry)
+        if seconds is not None:
+            label = f"Retrying in {seconds}s"
+    elif normalized in IN_PROGRESS_STATUSES:
         label = f"{label} ({clamp_progress(progress):.0%})"
     return f"{label}: {detail}" if detail else label
 
 
 def status_icon(status: Any) -> str:
-    return {
-        "installed": "CHECKMARK",
-        "completed": "CHECKMARK",
-        "failed": "ERROR",
-        "cancelled": "CANCEL",
-        "downloading": "IMPORT",
-        "checking": "VIEWZOOM",
-        "running": "TIME",
-        "queued": "TIME",
-    }.get(normalize_status(status), "RADIOBUT_OFF")
+    return STATE_ICONS.get(normalize_status(status), "RADIOBUT_OFF")
 
 
 def iter_jobs(snapshot: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
@@ -138,14 +272,112 @@ def find_model_state(snapshot: Mapping[str, Any], model_id: str) -> dict[str, An
         if job_model == model_id:
             matching.append(job)
     if not matching:
+        transfer = transfer_for_model(snapshot, model_id)
+        if transfer:
+            return {
+                "status": normalize_status(transfer.get("state")),
+                "progress": transfer_progress(transfer)[0],
+                "message": str(transfer.get("message") or ""),
+                "transfer_id": str(transfer.get("transfer_id") or ""),
+                "bytes_done": int(transfer.get("completed_bytes") or 0),
+                "bytes_total": int(transfer.get("total_bytes") or 0),
+                "error_code": str(transfer.get("error_code") or ""),
+            }
         return {"status": "not_downloaded", "progress": 0.0}
     state = dict(matching[-1])
     state["status"] = normalize_status(state.get("status"))
     return state
 
 
+def iter_transfers(snapshot: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
+    """Durable transfer records: readable with no engine and no session."""
+    transfers = snapshot.get("transfers", []) if isinstance(snapshot, Mapping) else []
+    if isinstance(transfers, Mapping):
+        yield from (record for record in transfers.values() if isinstance(record, Mapping))
+    elif isinstance(transfers, list):
+        yield from (record for record in transfers if isinstance(record, Mapping))
+
+
+def find_transfer(snapshot: Mapping[str, Any], transfer_id_value: str) -> dict[str, Any]:
+    if not transfer_id_value:
+        return {}
+    for record in iter_transfers(snapshot):
+        if str(record.get("transfer_id", "")) == transfer_id_value:
+            return dict(record)
+    return {}
+
+
+def transfer_for_model(snapshot: Mapping[str, Any], model_id: str) -> dict[str, Any]:
+    """The newest transfer for a model; journals are already sorted oldest first."""
+    if not model_id:
+        return {}
+    by_model = snapshot.get("transfers_by_model") if isinstance(snapshot, Mapping) else None
+    if isinstance(by_model, Mapping) and isinstance(by_model.get(model_id), Mapping):
+        return dict(by_model[model_id])
+    matches = [
+        dict(record) for record in iter_transfers(snapshot) if record.get("model_id") == model_id
+    ]
+    return matches[-1] if matches else {}
+
+
+def transfer_progress(record: Mapping[str, Any]) -> tuple[float, int, int]:
+    """(fraction, saved bytes, total bytes) from the durable checkpoint."""
+    try:
+        done = int(read_field(record, "completed_bytes", 0) or 0)
+    except (TypeError, ValueError):
+        done = 0
+    try:
+        total = int(read_field(record, "total_bytes", 0) or 0)
+    except (TypeError, ValueError):
+        total = 0
+    return (min(1.0, max(0.0, done / total)) if total > 0 else 0.0), done, total
+
+
+def attempt_count(record: Mapping[str, Any]) -> int:
+    """One-based attempt number: the journal counts consecutive failures."""
+    retry = read_field(record, "retry", {})
+    if not isinstance(retry, Mapping):
+        return 1
+    try:
+        failures = int(retry.get("consecutive_failures") or 0)
+    except (TypeError, ValueError):
+        failures = 0
+    return max(1, failures + 1)
+
+
+def saved_bytes_label(record: Mapping[str, Any]) -> str:
+    """What a resume would reuse, so the user knows nothing was thrown away."""
+    _, done, total = transfer_progress(record)
+    if total > 0:
+        return f"Saved {format_bytes(done)} of {format_bytes(total)}"
+    if done > 0:
+        return f"Saved {format_bytes(done)}"
+    return "No bytes saved yet"
+
+
+def transfer_resumable(record: Mapping[str, Any]) -> bool:
+    """A transfer the user can legitimately press Resume on."""
+    state = normalize_status(read_field(record, "state", ""))
+    return state not in IN_PROGRESS_STATUSES and state not in {"installed", "discarded"}
+
+
+def transfer_busy(record: Mapping[str, Any]) -> bool:
+    """The engine may still be writing bytes for this transfer."""
+    state = str(read_field(record, "state", "") or "")
+    return state in RESUMABLE_STATES or normalize_status(state) in IN_PROGRESS_STATUSES
+
+
 def has_active_jobs(snapshot: Mapping[str, Any]) -> bool:
-    return any(normalize_status(job.get("status")) in ACTIVE_STATUSES for job in iter_jobs(snapshot))
+    """True while a job is live or a transfer could still write bytes.
+
+    Resumable transfers count even with no engine: the bytes belong to that
+    models folder, and retiring the engine mid-write is how progress is lost.
+    """
+    if any(
+        normalize_status(job.get("status")) in ACTIVE_STATUSES for job in iter_jobs(snapshot)
+    ):
+        return True
+    return any(transfer_busy(record) for record in iter_transfers(snapshot))
 
 
 def resource_metric(snapshot: Mapping[str, Any], name: str) -> tuple[float, str]:

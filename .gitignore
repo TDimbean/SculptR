@@ -9,3 +9,12 @@ AGENTS.md
 
 # Release
 *.zip
+# Generated artifacts
+graphify-out/
+unsloth-tmp/
+.handoff/log/
+
+# Scratch: one-off verification scripts and redirected suite output
+scratch_*.py
+*-run.txt
+diag.txt

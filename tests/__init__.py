@@ -1,12 +1,7 @@
-"""SculptR automated tests.
+"""Standards-based unit tests for the download engine and its client.
 
-Run from the repository root:
-
-    python -m unittest discover
-
-The suite is stdlib-only and never touches the network: HTTP is exercised
-through scripted fakes, and the engine is exercised in-process or through a fake
-process handle. No test imports `bpy`; `tests/support.py` registers the
-`SculptR/` directory under the distribution name `sculptr` so the add-on
-modules can be imported outside Blender.
+Modules: `support` (local fake CDN), `test_process`, `test_transfers`,
+`test_hub_transfer`, `test_engine_recovery`. Run with
+`python -m unittest discover -s tests -v`. No test reaches the internet:
+`HubClient` is pointed at a 127.0.0.1 server, and `bpy` is never imported.
 """

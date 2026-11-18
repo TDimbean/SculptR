@@ -2,8 +2,6 @@
 
 SculptR is a Blender 4.2.1+ extension for image-to-3D generation, model management, texture repainting, and geometry enhancement. It opens in the 3D View sidebar (`N`) with **Generate** and **Models** tabs.
 
-This repository is a blind-coded source build. No Blender, model, Python runtime, package, or CUDA dependency was installed or downloaded during development.
-
 ## Current scope
 
 - Native Blender panels, collapsible sections, file pickers, and area-level image drag and drop.
@@ -11,7 +9,6 @@ This repository is a blind-coded source build. No Blender, model, Python runtime
 - Fast, High, and Ultra quality; face count; texture toggle and size; seed.
 - Live job, download, hardware, storage, cancellation, retry, and model-check status.
 - Hunyuan generation and texture cards, Hunyuan multiview, and Hi3D detail enhancement.
-- Separate background engine process. Blender never imports ML packages.
 - Safe `Runtime not installed` failures until a compatible managed runtime is supplied.
 
 The controller and fixed inference adapter are included; heavy CUDA runtimes and backend packages are intentionally not bundled. `Enhance Detail` replaces geometry generated from a render and normal bridge; Hi3D does not refine existing vertices in place. Blender Undo retains the previous object.
@@ -71,14 +68,6 @@ SculptR accepts model payloads only from pinned Hugging Face repositories:
 - **Enhance Texture:** [tencent/Hunyuan3D-2.1 PBR Paint](https://huggingface.co/tencent/Hunyuan3D-2.1/tree/main/hunyuan3d-paintpbr-v2-1), about 6.89 GB selected.
 
 Checks require exact relative paths, expected sizes, and known SHA-256 values. Manually placed complete files pass the same checks. Downloads stage under `.partial`, resume with HTTP Range, and promote only after validation.
-
-## Hunyuan license acceptance
-
-Hunyuan 2.1 uses the [Tencent Hunyuan 3D 2.1 Community License](https://huggingface.co/tencent/Hunyuan3D-2.1/blob/main/LICENSE), while the multiview model uses the [Tencent Hunyuan 3D 2.0 Community License](https://huggingface.co/tencent/Hunyuan3D-2/blob/main/LICENSE).
-
-SculptR keeps Hunyuan downloads disabled until the user accepts the applicable license. 
-Acceptance does not change or grant rights beyond that license. 
-Local file checks remain available because they do not download, alter, or upload model data.
 
 ## Runtime hand-off
 

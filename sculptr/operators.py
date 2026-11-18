@@ -1,16 +1,28 @@
 from pathlib import Path
 import uuid
+from typing import Any, Mapping
 
 import bpy
-from bpy.props import EnumProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, StringProperty
 
 from .bridge import get_client
+from .bridge import initialize as initialize_engine
+from .bridge import settings_from_context
 from .catalog import get_model
 from .properties import get_models_directory, get_preferences
+from .ui import arm_discard, clear_discard, discard_armed, set_engine_notice
 from .ui_helpers import (
+    IN_PROGRESS_STATUSES,
     choose_drop_slot,
-    has_active_jobs,
+    find_model_state,
+    find_transfer,
+    format_bytes,
+    normalize_status,
     read_field,
+    saved_bytes_label,
+    transfer_busy,
+    transfer_for_model,
+    transfer_progress,
     validate_image_path,
 )
 
@@ -25,19 +37,6 @@ IMAGE_SLOT_ITEMS = (
 
 def _slot_property(slot):
     return "main_image" if slot == "main" else f"{slot}_image"
-
-
-def _requires_hunyuan_license(model_id, model):
-    explicit = read_field(model, "requires_license", read_field(model, "restricted"))
-    if explicit is not None:
-        return bool(explicit)
-    repository = str(read_field(model, "repository", read_field(model, "repo_id", ""))).lower()
-    return repository.startswith("tencent/") or model_id in {
-        "hunyuan",
-        "hunyuan_mv",
-        "hunyuan_more_views",
-        "enhance_texture",
-    }
 
 
 def _submit(context, action, payload):
@@ -68,6 +67,99 @@ def _image_inputs(settings, mesh=None):
 
 def _output_directory(context):
     return get_models_directory(context) / ".sculptr" / "outputs" / uuid.uuid4().hex
+
+
+def _bridge_error_message(error: BaseException) -> str:
+    return str(error).strip() or error.__class__.__name__
+
+
+def _report_bridge_error(operator, error: BaseException, prefix: str = "") -> str:
+    """Turn a bridge refusal into panel text and a report, never a traceback."""
+    message = _bridge_error_message(error)
+    if prefix:
+        message = f"{prefix}: {message}"
+    set_engine_notice(message)
+    operator.report({"ERROR"}, message)
+    return message
+
+
+_RECOVERY_NOTICES = {
+    "engine_not_confirmed_dead": (
+        "Recovery deferred: the previous engine is still alive or its state cannot be "
+        "verified, so no second engine was started and nothing was killed."
+    ),
+    "restart_backoff": (
+        "Recovery deferred: the engine died repeatedly, so the restart waits "
+        "{retry_in_seconds}s instead of crash-looping. Saved bytes are untouched."
+    ),
+    "start_failed": "The engine could not start: {message}",
+}
+
+
+def _recovery_notice(result: Mapping[str, Any]) -> str:
+    """User-facing explanation of a `recover()` result, including why it waited."""
+    if read_field(result, "started"):
+        pid = read_field(result, "engine_pid", "")
+        return f"Engine running (pid {pid})"
+    reason = str(read_field(result, "reason", "unknown"))
+    template = _RECOVERY_NOTICES.get(reason, "Recovery deferred ({reason}).")
+    return template.format(
+        retry_in_seconds=read_field(result, "retry_in_seconds", "a few seconds"),
+        message=read_field(result, "message", "unknown error"),
+    )
+
+
+def _safe_recover(client, *, reason: str) -> dict[str, Any]:
+    """`recover` raises when the root is unknown; report instead of escaping."""
+    try:
+        return dict(client.recover(reason=reason))
+    except Exception as error:
+        return {"started": False, "reason": "start_failed", "message": _bridge_error_message(error)}
+
+
+def _transfer_context(context, required: str = "") -> tuple[Any, dict[str, Any]]:
+    """(client, transfer record) for a panel-supplied transfer id; record may be empty."""
+    client = get_client(context)
+    if not required:
+        return client, {}
+    try:
+        record = find_transfer(client.snapshot() or {}, required)
+    except Exception:
+        record = {}
+    return client, record
+
+
+def _model_is_downloading(context, model_id: str) -> bool:
+    """True when this model already has a live job or a resumable transfer."""
+    try:
+        snapshot = get_client(context).snapshot() or {}
+    except Exception:
+        return False
+    if normalize_status(find_model_state(snapshot, model_id).get("status")) in IN_PROGRESS_STATUSES:
+        return True
+    return transfer_busy(transfer_for_model(snapshot, model_id))
+
+
+def bootstrap_engine() -> None:
+    """Bind and start the engine once at enable time, off the draw loop.
+
+    Never raises into Blender and never blocks: an unset models folder or an
+    engine that cannot boot becomes panel text. The journals stay readable
+    either way, so the panel still lists saved bytes and offers Start Engine.
+    """
+    try:
+        if settings_from_context(bpy.context) is None:
+            set_engine_notice("Set the models folder in the Folder panel, then press Start Engine.")
+            return
+        client = initialize_engine(bpy.context)
+        snapshot = client.snapshot() or {}
+    except Exception as error:
+        set_engine_notice(f"The engine is not running yet: {_bridge_error_message(error)}")
+        return
+    if read_field(snapshot, "engine_alive"):
+        set_engine_notice(f"Engine running (pid {read_field(snapshot, 'engine_pid', '')})")
+        return
+    set_engine_notice(_recovery_notice(_safe_recover(client, reason="initialize")))
 
 
 class SCULPTR_OT_choose_image(bpy.types.Operator):
@@ -162,11 +254,35 @@ class SCULPTR_OT_change_models_folder(bpy.types.Operator):
             self.report({"ERROR"}, "Choose an existing folder")
             return {"CANCELLED"}
         client = get_client(context)
-        if has_active_jobs(client.snapshot()):
-            self.report({"ERROR"}, "Cancel active jobs before changing the models folder")
+        # `has_busy_work` counts resumable transfers, not only running jobs:
+        # retiring the engine while paused bytes exist is what makes a download
+        # restart from byte zero.
+        try:
+            busy = client.has_busy_work()
+        except Exception as error:
+            _report_bridge_error(self, error, prefix="Cannot check running downloads")
             return {"CANCELLED"}
-        client.stop()
+        if busy:
+            self.report(
+                {"ERROR"},
+                "A download is still running. Pause or cancel it before changing the models folder.",
+            )
+            return {"CANCELLED"}
         get_preferences(context).models_directory = str(directory)
+        try:
+            # The engine follows the new root now: `configure` retires the old
+            # session and starts a client bound to the folder just chosen.
+            client.configure(directory)
+        except Exception as error:
+            # The folder is already the user's; the engine can be started later
+            # with Start Engine, which reads this same preference.
+            message = _report_bridge_error(
+                self, error, prefix="Models folder set, but the engine did not start"
+            )
+            self.report({"WARNING"}, message)
+            return {"FINISHED"}
+        set_engine_notice("")
+        self.report({"INFO"}, f"Models folder set to {directory}; the engine follows it")
         return {"FINISHED"}
 
 
@@ -189,9 +305,13 @@ class SCULPTR_OT_open_diagnostics(bpy.types.Operator):
     bl_description = "Open the folder with engine logs, bridge logs, and archived job records"
 
     def execute(self, context):
-        snapshot = get_client(context).snapshot() or {}
-        logs = Path(str(read_field(snapshot, "log_path", ""))).parent
-        archive = Path(str(read_field(snapshot, "jobs_path", "")))
+        try:
+            snapshot = get_client(context).snapshot() or {}
+            logs = Path(str(read_field(snapshot, "log_path", ""))).parent
+            archive = Path(str(read_field(snapshot, "jobs_path", "")))
+        except Exception as error:
+            _report_bridge_error(self, error, prefix="Diagnostics are unavailable")
+            return {"CANCELLED"}
         target = logs if logs.is_dir() else archive
         if not target.is_dir():
             self.report({"ERROR"}, "Diagnostics have not been written yet")
@@ -215,15 +335,19 @@ class SCULPTR_OT_model_action(bpy.types.Operator):
 
     def execute(self, context):
         try:
-            model = get_model(self.model_id)
-            preferences = get_preferences(context)
+            get_model(self.model_id)
             if self.action in {"download", "retry"}:
-                if _requires_hunyuan_license(self.model_id, model) and not preferences.hunyuan_license_confirmed:
-                    self.report({"ERROR"}, "Accept the applicable Hunyuan license before downloading")
-                    return {"CANCELLED"}
                 if not getattr(bpy.app, "online_access", True):
                     self.report({"ERROR"}, "Enable Online Access in Blender Preferences")
                     return {"CANCELLED"}
+                # A second click must not queue a second job for the same model:
+                # the first one already owns the saved bytes.
+                if _model_is_downloading(context, self.model_id):
+                    self.report(
+                        {"INFO"},
+                        "This model is already downloading; saved bytes resume. Nothing new was queued.",
+                    )
+                    return {"FINISHED"}
             action = "check_model" if self.action == "check" else "download_model"
             _submit(
                 context,
@@ -231,11 +355,10 @@ class SCULPTR_OT_model_action(bpy.types.Operator):
                 {
                     "model_id": self.model_id,
                     "models_directory": str(get_models_directory(context)),
-                    "license_confirmed": bool(preferences.hunyuan_license_confirmed),
                 },
             )
         except Exception as error:
-            self.report({"ERROR"}, str(error))
+            _report_bridge_error(self, error, prefix="Could not queue this request")
             return {"CANCELLED"}
         return {"FINISHED"}
 
@@ -254,8 +377,186 @@ class SCULPTR_OT_cancel_job(bpy.types.Operator):
         try:
             get_client(context).cancel(self.job_id)
         except Exception as error:
-            self.report({"ERROR"}, str(error))
+            _report_bridge_error(self, error, prefix="Cancel failed")
             return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class SCULPTR_OT_initialize_engine(bpy.types.Operator):
+    bl_idname = "sculptr.initialize_engine"
+    bl_label = "Start Engine"
+    bl_description = (
+        "Bind the download engine to the models folder and start it, or recover it "
+        "if it died. Saved bytes resume from where they stopped"
+    )
+
+    def execute(self, context):
+        try:
+            client = initialize_engine(context)
+        except Exception as error:
+            _report_bridge_error(self, error, prefix="The engine cannot start")
+            return {"CANCELLED"}
+        if read_field(client.snapshot() or {}, "engine_alive"):
+            notice = f"Engine running (pid {read_field(client.snapshot() or {}, 'engine_pid', '')})"
+            set_engine_notice(notice)
+            self.report({"INFO"}, notice)
+            return {"FINISHED"}
+        notice = _recovery_notice(_safe_recover(client, reason="initialize"))
+        set_engine_notice(notice)
+        if notice.startswith("Engine running"):
+            self.report({"INFO"}, notice)
+            return {"FINISHED"}
+        self.report({"WARNING"}, notice)
+        return {"CANCELLED"}
+
+
+class SCULPTR_OT_recover_engine(bpy.types.Operator):
+    bl_idname = "sculptr.recover_engine"
+    bl_label = "Recover Engine"
+    bl_description = (
+        "Restart the engine after a crash, reboot, or lost network. Interrupted "
+        "downloads continue from their verified saved bytes"
+    )
+
+    def execute(self, context):
+        try:
+            client = get_client(context)
+        except Exception as error:
+            _report_bridge_error(self, error, prefix="Recovery is unavailable")
+            return {"CANCELLED"}
+        notice = _recovery_notice(_safe_recover(client, reason="user_recovery"))
+        set_engine_notice(notice)
+        if notice.startswith("Engine running"):
+            self.report({"INFO"}, notice)
+            return {"FINISHED"}
+        self.report({"WARNING"}, notice)
+        return {"CANCELLED"}
+
+
+class SCULPTR_OT_pause_transfer(bpy.types.Operator):
+    bl_idname = "sculptr.pause_transfer"
+    bl_label = "Pause"
+    bl_description = (
+        "Stop writing now and keep every committed byte; Resume continues from them"
+    )
+
+    transfer_id: StringProperty(options={"SKIP_SAVE"})
+
+    def execute(self, context):
+        if not self.transfer_id:
+            self.report({"ERROR"}, "This transfer is not available yet")
+            return {"CANCELLED"}
+        client, record = _transfer_context(context, self.transfer_id)
+        try:
+            client.pause_transfer(self.transfer_id)
+        except Exception as error:
+            _report_bridge_error(self, error, prefix="Pause failed")
+            return {"CANCELLED"}
+        model = str(read_field(record, "model_id", self.transfer_id))
+        notice = f"Paused {model}. {saved_bytes_label(record)} stay on disk."
+        set_engine_notice(notice)
+        self.report({"INFO"}, notice)
+        return {"FINISHED"}
+
+
+class SCULPTR_OT_resume_transfer(bpy.types.Operator):
+    bl_idname = "sculptr.resume_transfer"
+    bl_label = "Resume"
+    bl_description = (
+        "Continue this download from its saved bytes; it restarts from zero only "
+        "when the server no longer supports ranges or the bytes fail verification"
+    )
+
+    transfer_id: StringProperty(options={"SKIP_SAVE"})
+
+    def execute(self, context):
+        if not self.transfer_id:
+            self.report({"ERROR"}, "This transfer is not available yet")
+            return {"CANCELLED"}
+        client, record = _transfer_context(context, self.transfer_id)
+        authorization = read_field(record, "authorization", {})
+        # An intent written before this build, or one the engine left paused on the
+        # authorization gate, carries license_authorized false. The hub grants no
+        # acceptance step, so Resume states the authorization itself; otherwise
+        # Resume would re-pause on the same gate and the bytes would never move.
+        if (
+            isinstance(authorization, Mapping)
+            and read_field(authorization, "license_required")
+            and not read_field(authorization, "license_authorized")
+        ):
+            try:
+                client.authorize_transfer(self.transfer_id, True)
+            except Exception as error:
+                self.report(
+                    {"WARNING"},
+                    f"Could not record the authorization: {_bridge_error_message(error)}",
+                )
+        try:
+            client.resume_transfer(self.transfer_id)
+        except Exception as error:
+            _report_bridge_error(self, error, prefix="Resume failed")
+            return {"CANCELLED"}
+        model = str(read_field(record, "model_id", self.transfer_id))
+        notice = f"Resuming {model}: {saved_bytes_label(record)}. "
+        notice += (
+            "It continues from the saved offset unless the server rejects the range."
+        )
+        set_engine_notice(notice)
+        self.report({"INFO"}, notice)
+        return {"FINISHED"}
+
+
+class SCULPTR_OT_discard_transfer(bpy.types.Operator):
+    bl_idname = "sculptr.discard_transfer"
+    bl_label = "Discard Transfer"
+    bl_description = (
+        "Delete this transfer and its downloaded bytes. Needs a second confirmation"
+    )
+
+    transfer_id: StringProperty(options={"SKIP_SAVE"})
+    decision: EnumProperty(
+        items=(
+            ("request", "Discard", "Ask for confirmation before deleting"),
+            ("confirm", "Confirm Discard", "Delete now"),
+            ("keep", "Keep", "Cancel the pending discard"),
+        ),
+        default="request",
+        options={"SKIP_SAVE"},
+    )
+    confirmed: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
+
+    def invoke(self, context, event):
+        # Explicit invocation already comes from a menu or dialog: confirm once.
+        self.confirmed = True
+        return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        if not self.transfer_id:
+            self.report({"ERROR"}, "This transfer is not available yet")
+            return {"CANCELLED"}
+        client, record = _transfer_context(context, self.transfer_id)
+        model = str(read_field(record, "model_id", self.transfer_id))
+        deleted = format_bytes(transfer_progress(record)[1]) if record else "its downloaded bytes"
+        if self.decision == "keep":
+            clear_discard(self.transfer_id)
+            self.report({"INFO"}, f"Kept {model}: {deleted} left untouched")
+            return {"FINISHED"}
+        if not self.confirmed and not discard_armed(self.transfer_id):
+            arm_discard(self.transfer_id)
+            self.report(
+                {"WARNING"},
+                f"Discard deletes {deleted} of {model}. Press Discard again to confirm.",
+            )
+            return {"CANCELLED"}
+        clear_discard(self.transfer_id)
+        try:
+            client.discard_transfer(self.transfer_id)
+        except Exception as error:
+            _report_bridge_error(self, error, prefix="Discard failed")
+            return {"CANCELLED"}
+        notice = f"Discarded {model}: {deleted} deleted. A new download starts from zero."
+        set_engine_notice(notice)
+        self.report({"INFO"}, notice)
         return {"FINISHED"}
 
 
@@ -307,7 +608,7 @@ class SCULPTR_OT_clear_cache(bpy.types.Operator):
                 {"models_directory": str(get_models_directory(context))},
             )
         except Exception as error:
-            self.report({"ERROR"}, str(error))
+            self.report({"ERROR"}, _bridge_error_message(error))
             return {"CANCELLED"}
         return {"FINISHED"}
 
@@ -402,6 +703,11 @@ CLASSES = (
     SCULPTR_OT_open_diagnostics,
     SCULPTR_OT_model_action,
     SCULPTR_OT_cancel_job,
+    SCULPTR_OT_initialize_engine,
+    SCULPTR_OT_recover_engine,
+    SCULPTR_OT_pause_transfer,
+    SCULPTR_OT_resume_transfer,
+    SCULPTR_OT_discard_transfer,
     SCULPTR_OT_generate,
     SCULPTR_OT_clear_cache,
     SCULPTR_OT_enhance,

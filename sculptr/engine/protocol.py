@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..process import replace_atomic
+
 
 SCHEMA = 1
 ALLOWED_ACTIONS = {
@@ -41,7 +43,7 @@ def atomic_write_json(path: Path, value: object) -> None:
             json.dump(value, stream, ensure_ascii=False, separators=(",", ":"))
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary_path, path)
+        replace_atomic(temporary_path, path)
     finally:
         temporary_path.unlink(missing_ok=True)
 

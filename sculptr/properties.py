@@ -3,6 +3,8 @@ from pathlib import Path
 import bpy
 from bpy.props import BoolProperty, EnumProperty, IntProperty, PointerProperty, StringProperty
 
+from .catalog import HUNYUAN_LICENSE_URL, HUNYUAN_V2_LICENSE_URL
+
 
 def _default_models_directory():
     return bpy.utils.user_resource("DATAFILES", path="sculptr/models")
@@ -17,22 +19,16 @@ class SculptRPreferences(bpy.types.AddonPreferences):
         default=_default_models_directory(),
         subtype="DIR_PATH",
     )
-    hunyuan_license_confirmed: BoolProperty(
-        name="I accept the Hunyuan license for this US deployment",
-        description=(
-            "Review the applicable Tencent Hunyuan Community License; acceptance does not "
-            "change or grant rights beyond that license"
-        ),
-        default=False,
-    )
 
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "models_directory")
-        warning = layout.box()
-        warning.alert = not self.hunyuan_license_confirmed
-        warning.label(text="Review Hunyuan license before download", icon="ERROR")
-        warning.prop(self, "hunyuan_license_confirmed")
+        notice = layout.box()
+        notice.label(text="Review Hunyuan license before download", icon="INFO")
+        notice.label(text="This extension is only a hub for you to download and launch the models.")
+        notice.label(text="License for their use can only be granted by Tencent")
+        notice.label(text=f"Hunyuan 3D 2.1: {HUNYUAN_LICENSE_URL}")
+        notice.label(text=f"Hunyuan 3D 2.0: {HUNYUAN_V2_LICENSE_URL}")
 
 
 class SculptRSettings(bpy.types.PropertyGroup):

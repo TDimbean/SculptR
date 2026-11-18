@@ -39,12 +39,12 @@ Installing every catalog entry requires approximately **26.78 GB** before accoun
 
 ### Model licensing
 
-The Hunyuan catalog entries are marked as restricted by the extension. SculptR requires explicit confirmation before downloading them. The catalog records these upstream license pages:
+The Hunyuan catalog entries are marked as restricted in the catalog, and the Models tab and the Add-on page name their license pages. The hub states the authorization itself: it never asks you to accept anything and it never blocks a download because something is unaccepted. The catalog records these upstream license pages:
 
 - [Hunyuan3D 2.1 license](https://huggingface.co/tencent/Hunyuan3D-2.1/blob/main/LICENSE)
 - [Hunyuan3D 2.0 license](https://huggingface.co/tencent/Hunyuan3D-2/blob/main/LICENSE)
 
-The current Blender panels do not expose those URLs directly. The checkbox is only a guard in SculptR. It does not modify the upstream license or grant additional rights. Review every model's own license before downloading or using its output, especially for commercial work.
+Both pages print those license URLs as plain text; Blender panels have no clickable links, so copy the URL to open it. Neither page offers an acceptance checkbox and no download depends on one. The extension does not modify the upstream license or grant additional rights. Review every model's own license before downloading or using its output, especially for commercial work.
 
 ## Requirements
 
@@ -105,13 +105,7 @@ sculptr/models
 
 Use **Change** to select another existing folder. SculptR will not switch folders while jobs are active.
 
-### 2. Review model licenses
-
-Before downloading a restricted Hunyuan model, review the applicable upstream license listed above and enable the license-confirmation checkbox in the Models tab or the extension preferences.
-
-The current UI describes this confirmation in the context of a US deployment. Treat that wording as an application guard, not legal advice.
-
-### 3. Download the required model entries
+### 2. Download the required model entries
 
 Use **Download** beside each model you need. Downloads are staged in a `.partial` directory, can resume through HTTP range requests, and are verified before being moved into the final model directory.
 
@@ -131,7 +125,7 @@ Use **Check** to verify installed files. Model status is derived from jobs in th
 > [!NOTE]
 > A model check resolves the pinned repository metadata before verifying local files, so it currently requires network access as well.
 
-### 4. Provision the inference runtimes
+### 3. Provision the inference runtimes
 
 The engine expects the following layout inside the configured models directory:
 
@@ -434,10 +428,6 @@ The runtime started, but it could not import the expected backend module or find
 ### Blender asks for Online Access
 
 Enable online access in Blender preferences. SculptR checks this setting before starting a model download.
-
-### Hunyuan download is blocked
-
-Review the applicable Hunyuan license listed in this README and enable the license-confirmation checkbox. SculptR refuses restricted downloads without it.
 
 ### A Hugging Face download returns an authorization error
 

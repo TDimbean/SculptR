@@ -1,3 +1,27 @@
+def _bootstrap_engine():
+    """One-shot engine start, deferred off the draw loop; never raises."""
+    from .operators import bootstrap_engine
+
+    bootstrap_engine()
+    return None
+
+
+def _start_engine_bootstrap():
+    import bpy
+
+    if not bpy.app.timers.is_registered(_bootstrap_engine):
+        # Deferred on purpose: enabling the add-on must not spawn a process or
+        # block the interface, and a failed start is reported in the panel.
+        bpy.app.timers.register(_bootstrap_engine, first_interval=1.0)
+
+
+def _stop_engine_bootstrap():
+    import bpy
+
+    if bpy.app.timers.is_registered(_bootstrap_engine):
+        bpy.app.timers.unregister(_bootstrap_engine)
+
+
 def register():
     import bpy
 
@@ -11,6 +35,7 @@ def register():
         bpy.utils.register_class(cls)
     register_properties()
     start_runtime_poll()
+    _start_engine_bootstrap()
 
 
 def unregister():
@@ -22,6 +47,7 @@ def unregister():
     from .ui import CLASSES as UI_CLASSES
     from .ui import stop_runtime_poll
 
+    _stop_engine_bootstrap()
     stop_runtime_poll()
     try:
         # `stop` must not re-configure: a disabled add-on may never start a new

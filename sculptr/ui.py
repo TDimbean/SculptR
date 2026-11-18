@@ -1,35 +1,108 @@
+import time
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 import bpy
 
 from .bridge import get_client
-from .catalog import MODELS
+from .catalog import HUNYUAN_LICENSE_URL, HUNYUAN_V2_LICENSE_URL, MODELS
 from .properties import get_models_directory, get_preferences
 from .ui_helpers import (
     ACTIVE_STATUSES,
+    IN_PROGRESS_STATUSES,
+    attempt_count,
     clamp_progress,
+    failure_message,
     find_job,
     find_model_state,
     format_bytes,
     has_active_jobs,
+    iter_transfers,
     normalize_status,
     read_field,
     resource_metric,
     result_path,
+    saved_bytes_label,
     status_icon,
     status_label,
     storage_label,
+    transfer_progress,
+    transfer_resumable,
     validate_image_path,
 )
 
 
 _SNAPSHOT = {}
 _RUNTIME_ERROR = ""
+_ENGINE_NOTICE = ""
+_DISCARD_ARMED: dict[str, float] = {}
+_DISCARD_WINDOW_SECONDS = 20.0
 
 
 def runtime_snapshot():
     return _SNAPSHOT
+
+
+def engine_notice() -> str:
+    """Last lifecycle answer the panel should show: deferred starts, pause reasons."""
+    return _ENGINE_NOTICE
+
+
+def set_engine_notice(message: str) -> None:
+    """Record a lifecycle result for display; drawing itself stays read-only."""
+    global _ENGINE_NOTICE
+    _ENGINE_NOTICE = str(message or "")
+    _tag_view3d_redraw()
+
+
+def arm_discard(transfer_id: str) -> None:
+    """Open the confirmation window for deleting this transfer's bytes."""
+    _DISCARD_ARMED[transfer_id] = time.monotonic()
+
+
+def discard_armed(transfer_id: str) -> bool:
+    """True while a discard confirmation is still waiting for a second click."""
+    opened = _DISCARD_ARMED.get(transfer_id)
+    if opened is None:
+        return False
+    if time.monotonic() - opened > _DISCARD_WINDOW_SECONDS:
+        _DISCARD_ARMED.pop(transfer_id, None)
+        return False
+    return True
+
+
+def clear_discard(transfer_id: str) -> None:
+    _DISCARD_ARMED.pop(transfer_id, None)
+
+
+def _wrap_text(text: str, width: int = 46) -> tuple[str, ...]:
+    """Panel labels do not wrap, so long explanations are broken by hand."""
+    words = str(text or "").split()
+    lines = []
+    current = ""
+    for word in words:
+        if current and len(current) + 1 + len(word) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}" if current else word
+    if current:
+        lines.append(current)
+    return tuple(lines)
+
+
+def _age_label(epoch: Any) -> str:
+    """How long ago an engine timestamp was, in coarse units."""
+    try:
+        seconds = max(0, round(time.time() - float(epoch)))
+    except (TypeError, ValueError):
+        return ""
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    return f"{seconds // 3600}h ago"
+
 
 
 def _tag_view3d_redraw():
@@ -96,19 +169,6 @@ def _model_size(model):
     return format_bytes(size)
 
 
-def _model_requires_license(model_id, model):
-    explicit = read_field(model, "requires_license", read_field(model, "restricted"))
-    if explicit is not None:
-        return bool(explicit)
-    repository = str(read_field(model, "repository", read_field(model, "repo_id", ""))).lower()
-    return repository.startswith("tencent/") or model_id in {
-        "hunyuan",
-        "hunyuan_mv",
-        "hunyuan_more_views",
-        "enhance_texture",
-    }
-
-
 def _model_id_containing(text):
     text = text.lower()
     for model_id, model in _catalog_models():
@@ -123,7 +183,7 @@ def _engine_failure():
 
 
 def _draw_engine_status(layout):
-    """Say whether the engine is alive and where its diagnostics live."""
+    """Say whether the engine is alive, what it last answered, and how to start it."""
     alive = bool(read_field(_SNAPSHOT, "engine_alive", False))
     pid = read_field(_SNAPSHOT, "engine_pid", None)
     label = "Engine running" if alive else "Engine stopped"
@@ -132,6 +192,24 @@ def _draw_engine_status(layout):
     row = layout.row()
     row.alert = not alive
     row.label(text=label, icon="CHECKMARK" if alive else "ERROR")
+    heartbeat = read_field(_SNAPSHOT, "engine_heartbeat", None)
+    if alive and heartbeat:
+        age = _age_label(heartbeat)
+        if age:
+            layout.label(text=f"Heartbeat {age}", icon="TIME")
+    notice = engine_notice()
+    if notice:
+        notice_row = layout.row()
+        notice_row.alert = not alive
+        for line in _wrap_text(notice):
+            notice_row.label(text=line, icon="INFO")
+    lifecycle = layout.row(align=True)
+    start = lifecycle.column()
+    start.enabled = not alive
+    start.operator("sculptr.initialize_engine", text="Start Engine", icon="PLAY")
+    recover = lifecycle.column()
+    recover.enabled = not alive
+    recover.operator("sculptr.recover_engine", text="Recover", icon="FILE_REFRESH")
     layout.operator("sculptr.open_diagnostics", text="Open Diagnostics", icon="FILE_FOLDER")
 
 
@@ -142,11 +220,88 @@ def _draw_engine_failure(layout):
         return
     box = layout.box()
     box.alert = True
-    box.label(text=str(read_field(failure, "message", "SculptR engine stopped")), icon="ERROR")
+    message = str(read_field(failure, "message", "SculptR engine stopped"))
+    code = str(read_field(failure, "error_code", read_field(failure, "reason", "")))
+    for line in _wrap_text(failure_message(code, message) or message):
+        box.label(text=line, icon="ERROR")
     reason = str(read_field(failure, "reason", ""))
-    if reason:
+    if reason and reason != code:
         box.label(text=f"Reason: {reason}", icon="INFO")
-    box.operator("sculptr.open_diagnostics", text="Open Diagnostics", icon="FILE_FOLDER")
+    exit_code = read_field(failure, "exit_code", None)
+    if exit_code is not None:
+        box.label(text=f"Exit code: {exit_code}", icon="INFO")
+    recovered = str(read_field(failure, "recovered_at", ""))
+    if recovered:
+        box.label(text=f"Last recovery: {_age_label(recovered)}", icon="FILE_REFRESH")
+    buttons = box.row(align=True)
+    buttons.operator("sculptr.recover_engine", text="Recover Engine", icon="FILE_REFRESH")
+    buttons.operator("sculptr.open_diagnostics", text="Open Diagnostics", icon="FILE_FOLDER")
+
+
+def _draw_transfer_rows(layout):
+    """One row per durable transfer record; the engine owns the bytes, we only read.
+
+    Resume/Pause/Discard call operators, never the bridge from here, so a redraw
+    cannot restart, stop, or delete anything.
+    """
+    records = list(iter_transfers(_SNAPSHOT))
+    if not records:
+        return
+    section = layout.box()
+    section.label(text=f"Downloads ({len(records)})", icon="IMPORT")
+    for record in records[-6:]:
+        state = normalize_status(read_field(record, "state", ""))
+        transfer_id = str(read_field(record, "transfer_id", ""))
+        factor, saved, total = transfer_progress(record)
+        retry = read_field(record, "retry", {})
+        detail = str(read_field(record, "message", "") or "")
+        error_code = str(read_field(record, "error_code", "") or "")
+        card = section.box()
+        title = card.row()
+        title.label(text=str(read_field(record, "model_id", "Model")))
+        if total:
+            title.label(text=format_bytes(total))
+        status_row = card.row()
+        status_row.alert = state in {"failed", "cancelled", "discarded"}
+        status_row.label(
+            text=status_label(state, factor, detail, retry if isinstance(retry, Mapping) else None),
+            icon=status_icon(state),
+        )
+        if factor > 0.0 or state in IN_PROGRESS_STATUSES or state == "paused":
+            card.progress(
+                factor=factor,
+                text=f"{format_bytes(saved)} / {format_bytes(total)}" if total else format_bytes(saved),
+            )
+        reason = failure_message(error_code, detail) if error_code else detail
+        for line in _wrap_text(reason):
+            card.label(text=line, icon="ERROR" if state == "failed" else "INFO")
+        saved_row = card.row()
+        saved_row.label(text=saved_bytes_label(record), icon="FILE_FOLDER")
+        saved_row.label(text=f"Attempt {attempt_count(record)}", icon="TIME")
+
+        actions = card.row(align=True)
+        resume = actions.column()
+        resume.enabled = transfer_resumable(record)
+        operator = resume.operator("sculptr.resume_transfer", text="Resume", icon="PLAY")
+        operator.transfer_id = transfer_id
+        pause = actions.column()
+        pause.enabled = state in IN_PROGRESS_STATUSES
+        operator = pause.operator("sculptr.pause_transfer", text="Pause", icon="PAUSE")
+        operator.transfer_id = transfer_id
+        if discard_armed(transfer_id):
+            confirm = actions.column()
+            confirm.alert = True
+            operator = confirm.operator("sculptr.discard_transfer", text="Confirm Discard", icon="TRASH")
+            operator.decision = "confirm"
+            operator.transfer_id = transfer_id
+            keep = actions.column()
+            operator = keep.operator("sculptr.discard_transfer", text="Keep", icon="CANCEL")
+            operator.decision = "keep"
+            operator.transfer_id = transfer_id
+        else:
+            operator = actions.operator("sculptr.discard_transfer", text="Discard", icon="TRASH")
+            operator.transfer_id = transfer_id
+
 
 
 def _model_installed(model_id):
@@ -383,14 +538,23 @@ class SCULPTR_PT_folder(_SculptRChildPanel, bpy.types.Panel):
         path_row.prop(preferences, "models_directory", text="", icon="FILE_FOLDER")
         layout.label(text=storage_label(_SNAPSHOT))
         _draw_engine_status(layout)
+        _draw_transfer_rows(layout)
 
         buttons = layout.row(align=True)
+        busy = has_active_jobs(_SNAPSHOT)
         change = buttons.column()
-        change.enabled = not has_active_jobs(_SNAPSHOT)
+        change.enabled = not busy
         change.operator("sculptr.change_models_folder", text="Change", icon="FILE_FOLDER")
         open_folder = buttons.column()
         open_folder.enabled = path.is_dir()
         open_folder.operator("sculptr.open_models_folder", text="Open in Explorer", icon="DISCLOSURE_TRI_RIGHT")
+        if busy:
+            hint = layout.row()
+            hint.alert = True
+            for line in _wrap_text(
+                "A download is still running. Pause or cancel it before changing the models folder."
+            ):
+                hint.label(text=line, icon="INFO")
 
 
 class SCULPTR_PT_models(_SculptRChildPanel, bpy.types.Panel):
@@ -404,16 +568,12 @@ class SCULPTR_PT_models(_SculptRChildPanel, bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        preferences = get_preferences(context)
-
         license_box = layout.box()
-        license_box.alert = not preferences.hunyuan_license_confirmed
-        license_box.label(text="US deployment: review Hunyuan license", icon="ERROR")
-        license_box.prop(
-            preferences,
-            "hunyuan_license_confirmed",
-            text="I accept the applicable Hunyuan license",
-        )
+        license_box.label(text="Review Hunyuan license", icon="INFO")
+        license_box.label(text="This extension is only a hub for you to download and launch the models.")
+        license_box.label(text="License for their use can only be granted by Tencent")
+        license_box.label(text=f"Hunyuan 3D 2.1: {HUNYUAN_LICENSE_URL}")
+        license_box.label(text=f"Hunyuan 3D 2.0: {HUNYUAN_V2_LICENSE_URL}")
 
         for model_id, model in _catalog_models():
             state = find_model_state(_SNAPSHOT, model_id)
@@ -421,26 +581,46 @@ class SCULPTR_PT_models(_SculptRChildPanel, bpy.types.Panel):
             progress = clamp_progress(state.get("progress", state.get("percent", 0.0)))
             detail = str(state.get("message", state.get("detail", state.get("error", ""))))
             job_id = str(state.get("job_id", state.get("id", "")))
+            transfer_id = str(state.get("transfer_id", ""))
+            error_code = str(state.get("error_code", ""))
+            next_attempt = state.get("next_attempt_at")
+            retry = {"next_attempt_at": next_attempt} if next_attempt else None
+            saved = int(state.get("bytes_done") or 0)
+            total = int(state.get("bytes_total") or 0)
 
             card = layout.box()
             title = card.row()
             title.label(text=_model_name(model))
             title.label(text=_model_size(model))
             status_row = card.row()
-            status_row.alert = status == "failed"
-            status_row.label(text=status_label(status, progress, detail), icon=status_icon(status))
-            if status in {"checking", "downloading"}:
-                card.progress(factor=progress, text=f"{progress:.0%}")
+            status_row.alert = status in {"failed", "paused", "cancelled"}
+            status_row.label(
+                text=status_label(status, progress, detail, retry), icon=status_icon(status)
+            )
+            if status in IN_PROGRESS_STATUSES or status == "paused":
+                card.progress(
+                    factor=progress,
+                    text=f"{format_bytes(saved)} / {format_bytes(total)}" if total else "",
+                )
+            if error_code:
+                for line in _wrap_text(failure_message(error_code, detail)):
+                    card.label(text=line, icon="ERROR")
 
             actions = card.row(align=True)
             primary = actions.column()
-            restricted = _model_requires_license(model_id, model)
-            if status == "downloading":
+            if status in IN_PROGRESS_STATUSES:
                 primary.enabled = bool(job_id)
                 operator = primary.operator("sculptr.cancel_job", text="Cancel", icon="CANCEL")
                 operator.job_id = job_id
+                pause = actions.column()
+                pause.enabled = bool(transfer_id)
+                operator = pause.operator("sculptr.pause_transfer", text="Pause", icon="PAUSE")
+                operator.transfer_id = transfer_id
+            elif status == "paused":
+                primary.enabled = bool(transfer_id)
+                operator = primary.operator("sculptr.resume_transfer", text="Resume", icon="PLAY")
+                operator.transfer_id = transfer_id
             elif status in {"failed", "cancelled"}:
-                primary.enabled = not restricted or preferences.hunyuan_license_confirmed
                 operator = primary.operator("sculptr.model_action", text="Retry", icon="FILE_REFRESH")
                 operator.action = "retry"
                 operator.model_id = model_id
@@ -448,10 +628,7 @@ class SCULPTR_PT_models(_SculptRChildPanel, bpy.types.Panel):
                 primary.enabled = False
                 primary.operator("sculptr.model_action", text="Installed", icon="CHECKMARK")
             else:
-                primary.enabled = (
-                    status not in ACTIVE_STATUSES
-                    and (not restricted or preferences.hunyuan_license_confirmed)
-                )
+                primary.enabled = status not in ACTIVE_STATUSES
                 operator = primary.operator("sculptr.model_action", text="Download", icon="IMPORT")
                 operator.action = "download"
                 operator.model_id = model_id

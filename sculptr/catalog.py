@@ -8,9 +8,9 @@ from pathlib import PurePosixPath
 HUNYUAN_LICENSE_URL = "https://huggingface.co/tencent/Hunyuan3D-2.1/blob/main/LICENSE"
 HUNYUAN_V2_LICENSE_URL = "https://huggingface.co/tencent/Hunyuan3D-2/blob/main/LICENSE"
 HUNYUAN_LICENSE_NOTICE = (
-    "Review and accept the Tencent Hunyuan Community License before download. "
-    "SculptR targets a US studio deployment; acceptance does not change or "
-    "grant rights beyond the license."
+    "This extension is only a hub for you to download and launch the models. "
+    "License for their use can only be granted by Tencent. Review the license "
+    "pages before downloading; the hub does not modify them or grant rights."
 )
 
 
