@@ -172,6 +172,9 @@ class BridgeClient:
         self._heartbeat_written_at = 0.0
         self._transfers_read_at = 0.0
         self._transfers_cache: list[dict[str, Any]] = []
+        # The merged records depend on engine liveness, so a cache hit must not
+        # cross an engine start or exit.
+        self._transfers_alive = True
         self._shutdown_done = False
 
     def __enter__(self) -> "BridgeClient":
@@ -346,6 +349,7 @@ class BridgeClient:
             self._shutdown_done = False
             self._pending.clear()
             self._transfers_cache = []
+            self._transfers_alive = True
             self._log.bind(session=self._session.name, pid=os.getpid())
             self._log.event(
                 "bridge_session",
@@ -518,25 +522,37 @@ class BridgeClient:
             if root is None:
                 return []
             now = time.monotonic()
+            alive = self._is_running()
             # Transfer records change at most a few times a second; reading a
             # handful of small files every 0.5s poll would be pure overhead.
-            if now - self._transfers_read_at >= 1.0:
+            # Liveness is part of the cache key: a dead engine leaves states the
+            # session that wrote them will never advance, and the merge reports
+            # those through the user's intent instead.
+            if now - self._transfers_read_at >= 1.0 or alive != self._transfers_alive:
                 self._transfers_read_at = now
+                self._transfers_alive = alive
                 try:
-                    self._transfers_cache = merged_records(root)
+                    self._transfers_cache = merged_records(root, engine_alive=alive)
                 except OSError as error:
                     self._log_event("transfers_read_failed", message=str(error)[:200])
             return [dict(record) for record in self._transfers_cache]
 
     def has_busy_work(self) -> bool:
-        """True when a job is active or a transfer could still be writing."""
+        """True when a job is active or a transfer could still be writing.
+
+        A transfer the user paused or discarded is not busy work even when its
+        state journal still says `queued`/`active`/`verifying`: with no engine
+        running nothing is writing those bytes, and letting that stale state
+        block the models folder forever is what traps the user, who is told to
+        pause or cancel a download that already cannot run.
+        """
         if self._has_active_job():
             return True
         root = self._model_root or self._configured_root
         if root is None:
             return False
         try:
-            records = merged_records(root)
+            records = merged_records(root, engine_alive=self._is_running())
         except OSError:
             return False
         return any(str(record.get("state")) in RESUMABLE_STATES for record in records)

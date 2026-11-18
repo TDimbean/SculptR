@@ -133,7 +133,56 @@ class TransferControlTests(unittest.TestCase):
         for state in DISCARD_EXCLUDED_STATES:
             self.assertIn(state, texts, msg=f"Discard is offered for a {state} transfer again")
 
-    def test_the_helper_that_fed_the_removed_button_is_gone(self):
+    def test_the_folder_drawer_names_the_change_button_and_gates_it(self):
+        """The control says what it changes, and its grey state is the real gate.
+
+        "Change" by itself names no noun, so the reader guesses; the drawer's own
+        gate is `has_active_jobs`, the same busy notion `BridgeClient.has_busy_work`
+        enforces when the operator runs, so a live button is never one the engine
+        would then refuse.
+        """
+        source = UI_SOURCE.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(UI_SOURCE))
+        drawers = [
+            node
+            for name, nodes in _named_draw_units(tree).items()
+            for node in nodes
+            if name == "draw" and "sculptr.change_models_folder" in _operator_targets(node)
+        ]
+        self.assertEqual(
+            len(drawers), 1, msg="the change button moved out of the Folder drawer"
+        )
+        drawer = drawers[0]
+        texts = _string_constants(drawer)
+        self.assertIn("Change Folder", texts, msg="the button lost its noun")
+        self.assertIn(
+            "Download running. Pause or cancel it before changing the folder.",
+            texts,
+            msg="the drawer no longer says why the button is grey",
+        )
+        self.assertTrue(
+            any(
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Name)
+                and inner.func.id == "has_active_jobs"
+                for inner in ast.walk(drawer)
+            ),
+            msg="the button is no longer gated on the busy snapshot",
+        )
+        self.assertTrue(
+            any(
+                isinstance(inner, ast.Assign)
+                and any(
+                    isinstance(target, ast.Attribute) and target.attr == "enabled"
+                    for target in inner.targets
+                )
+                and isinstance(inner.value, ast.UnaryOp)
+                and isinstance(inner.value.op, ast.Not)
+                for inner in ast.walk(drawer)
+            ),
+            msg="nothing disables the change button while work is active",
+        )
+
         for path in (UI_SOURCE, HELPERS_SOURCE):
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("transfer_resumable", text, msg=f"{path} keeps a helper nothing calls")

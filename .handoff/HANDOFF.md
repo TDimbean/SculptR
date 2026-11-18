@@ -18,7 +18,50 @@
 
 ## Status
 
-- **Last updated:** 2026-11-18 12:48 -- session 2026-11-18-kv8x (downloads no longer restart at zero near completion: an LFS/XET file verifies with its pointer SHA-256, not the pointer's blob hash)
+- **Last updated:** 2026-11-18 15:49 -- session 2026-11-18-j4vt (the alert stayed on because the
+  panel's JOB clause counted a paused download as a writer; the live models root is Blender's
+  DATAFILES default, not the hand-configured one)
+- **Folder alert still on (j4vt, T-036):** T-035 fixed the transfer half; the second screenshot (15:08)
+  proved a second source in the same boolean. `ui_helpers.has_active_jobs` job clause tested against
+  `ACTIVE_STATUSES`, which contains `paused`, and the live root holds 76 job archives of which 7 are
+  `status=paused` ("Paused by user; committed bytes kept -- resume when ready"): a download the user
+  stopped writes nothing, so the red hint and the grey Change stayed on forever, with Pause already
+  pressed and Cancel unable to touch the archive. `bridge.py:90 ACTIVE_STATUSES` never contained
+  `paused`, so bridge + operator + `transfer_busy` already agreed -- the panel was the last layer
+  disagreeing. Fix: job clause -> `IN_PROGRESS_STATUSES` (`ui_helpers.py:378`) and the comment over
+  `ACTIVE_STATUSES` made truthful (paused is unfinished work for rows/Resume, not a writer for the
+  folder gate). Second discovery: the live models root is the DATAFILES default
+  `...\Blender Foundation\Blender\5.2\datafiles\sculptr\models`, NOT `Documents\Projects\Local AI\SculptR_Models`;
+  `%APPDATA%` had never been scanned, so every journal read in T-035 came from a root last touched
+  2026-11-17 23:47. Proof: `unsloth-tmp/gate_replay.py` over the live root's 76 archives + 5 merged
+  transfers -- True on the stale installed copy, **False** after the re-sync for `engine_alive` both
+  True/False; live Blender 5.2.3 `-b` (`unsloth-tmp/blender_gate_check.py`) reads the add-on's own
+  `models_directory` (that root) and prints `has_active_jobs: False`, exit 0. The `%APPDATA%` copy was
+  stale for this edit, so all 11 files were re-synced and hash-pairwise-proven
+  (`unsloth-tmp/sync_installed.py`; ui_helpers 17654 B `cab0298728a9`, others unchanged). Tests +5 in
+  new `tests/test_ui_folder_busy_gate.py` (pins `paused` in `ACTIVE_STATUSES` and out of
+  `IN_PROGRESS_STATUSES`); suite Ran **90, 0 failed**; `compileall` exit 0 both trees;
+  `graphify update .` 1034 nodes / 2749 edges / 48 communities. Untouched findings left open:
+  `models_directory` is not persisted in prefs, so every restart retargets the DATAFILES default and
+  silently loses the folder the user chose; `t-e2c6328e...` reports `installed` with
+  `completed_bytes=0` of 8022078964, which renders as the screenshot's "Saved 0 B of 7.47 GB".
+  Details: `.handoff/log/2026-11-18-j4vt.md` 15:49.
+- **Busy gate + button label (b8qm, T-035):** both reported symptoms came from one line -- `ui.py:512-528`
+- **Busy gate + button label (b8qm, T-035):** both reported symptoms came from one line -- `ui.py:512-528`
+  sets `busy = has_active_jobs(_SNAPSHOT)`, which greys the Change button and draws the red hint. `transfer_busy`
+  and `bridge.has_busy_work` read only the STATE journal, whose only writer is the engine, so a session that died
+  mid-chunk left `queued`/`active`/`verifying` forever: Pause and Cancel write the INTENT journal only, so the panel
+  kept reporting a download no process owns and blocked the folder with no way out (reproduced:
+  `unsloth-tmp/busy_gate_probe.py` -> `has_active_jobs` True for a paused/discarded intent over a resumable state).
+  Fix at the merge layer: `_reconciled_state` + `merged_records(models_root, *, engine_alive=True)` report a state
+  nothing can advance through the user's intent; `bridge.transfer_records`/`has_busy_work` pass
+  `engine_alive=self._is_running()` and liveness joined the 1s record-cache key (`_transfers_alive`). Button
+  relabelled `Change` -> `Change Folder`; README-2.md:106 renamed. Tests +7 (3 in `test_transfers.py`, 3 in new
+  `test_bridge_busy_gate.py`, 1 AST case in `test_ui_transfer_controls.py`); suite Ran **85, 0 failed** (78 before);
+  `compileall` exit 0; `graphify update .` = 1024 nodes / 2732 edges / 46 communities; installed `%APPDATA%` copy
+  hash-equal (ui 262A06A2DBA8, ui_helpers 878F9E7683F3, transfers 784CB428360B, bridge 6A85FAA1DE2B); `blender -b`
+  starts clean. NOT verified: the drawer rendered against the user's live journals -- the only record on disk now is
+  `t-284ef2be...` state `discarded` (busy False). Details: `.handoff/log/2026-11-18-b8qm.md` 14:33.
 - **Downloads, digest kind (kv8x, T-034):** an LFS/XET-stored file has no content blob -- its git blob is the ~135-byte
   pointer text, so `blobId` describes metadata and can never match the payload. `_remote_file` used to carry it
   as `git_sha1` for EVERY file, so the 7,366,389,768-byte Hunyuan checkpoint failed verification always:

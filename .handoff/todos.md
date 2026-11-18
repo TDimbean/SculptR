@@ -21,6 +21,60 @@
 
 ## Done
 
+- [x] T-036 Alert still on after T-035 (user's second screenshot, 15:08) -- fixed at `sculptr/ui_helpers.py:378`.
+      The transfer merge was right; the JOB clause of the same gate was lying. `has_active_jobs` tested job
+      statuses against `ACTIVE_STATUSES`, which contains `paused`, and the live models root holds 7 job
+      archives `status=paused` ("Paused by user; committed bytes kept -- resume when ready") plus 32 completed,
+      18 failed, 13 not_downloaded, 5 installed, 1 cancelled. A download the user stopped writes nothing, so
+      the drawer kept drawing "Download running" and greying Change Folder with no way out -- Pause was already
+      pressed, Cancel changed only the transfer, never the archive. `bridge.py:90 ACTIVE_STATUSES` had never
+      contained `paused` ("terminal for a job, the transfer behind it stays resumable"), so the engine and the
+      operator already disagreed with the panel. Fix: the job clause reads `IN_PROGRESS_STATUSES`; the comment
+      over `ACTIVE_STATUSES` now says why `paused` stays there (rows, Resume, committed bytes) and why the folder
+      gate does not.
+      Second root cause found while reproducing: the live models root is the unpersisted DATAFILES default
+      `C:\Users\r00st\AppData\Roaming\Blender Foundation\Blender\5.2\datafiles\sculptr\models`, NOT the
+      hand-configured `Documents\Projects\Local AI\SculptR_Models` -- earlier scans skipped `%APPDATA%`, so
+      every journal read in T-035 came from a root last touched 2026-11-17 23:47. Proved in live Blender 5.2
+      `-b` through the add-on's own accessor (`unsloth-tmp/blender_gate_check.py`).
+      Proof of the flip: `unsloth-tmp/gate_replay.py` replays the live root's 76 archives + 5 merged transfers
+      -- True before the sync (the `%APPDATA%` copy was stale), False after, for `engine_alive` both True and
+      False; the Blender check prints `has_active_jobs: False`. The stale installed copy also invalidated the
+      "hash-equal" claim in T-035: re-synced all 11 files with `unsloth-tmp/sync_installed.py` (ui_helpers
+      17654 B sha256 cab0298728a9, the other ten unchanged, e.g. ui 262a06a2dba8, bridge 6a85faa1de2b).
+      Tests +5, new `tests/test_ui_folder_busy_gate.py` (pins `paused` inside `ACTIVE_STATUSES` and outside
+      `IN_PROGRESS_STATUSES`, so the fix cannot pass by moving the state out of the unfinished set; paused job
+      frees, queued/downloading/retrying/waiting/verifying/checking hold, running transfer holds with no job,
+      installed/paused/discarded/failed records free). Suite Ran **90, 0 failed** (85 before); `compileall`
+      exit 0 for repo and installed trees; `graphify update .` 1034 nodes / 2749 edges / 48 communities.
+      Left open, both new product-level findings, untouched: `models_directory` is not persisted in
+      `preferences.prop`, so every Blender restart silently retargets the DATAFILES default and loses the
+      folder the user chose; and `t-e2c6328e69b722f4fcf8810480561ce2` reports `installed` with
+      `completed_bytes=0` of 8022078964, which renders as "Saved 0 B of 7.47 GB" for a model that is fully
+      installed. Details: `.handoff/log/2026-11-18-j4vt.md` 15:49.
+
+- [x] T-035 Folder alert always on + Change always grey -- fixed at `sculptr/transfers.py`, label at
+      `sculptr/ui.py`. One gate caused both: `busy = has_active_jobs(_SNAPSHOT)` (`ui.py:513`) disables
+      the button and draws the red hint. `transfer_busy` and `bridge.has_busy_work` read only the STATE
+      journal, whose only writer is the engine, so a session that died mid-chunk left `queued`/`active`/
+      `verifying` forever -- Pause and Cancel write the INTENT journal only, so the panel reported a
+      download no process owns and blocked the folder with no way out. Proof: `unsloth-tmp/busy_gate_probe.py`
+      on journal shapes copied from the real root -> `transfer_busy` True, `has_active_jobs` True.
+      Fix: `_reconciled_state` + `merged_records(models_root, *, engine_alive=True)` -- with no engine, a
+      state nothing can advance is reported through the user's intent (PAUSED -> paused, DISCARDED ->
+      discarded, phase/message cleared); `bridge.transfer_records`/`has_busy_work` pass
+      `engine_alive=self._is_running()` and liveness became part of the 1s record-cache key
+      (`_transfers_alive`). Button relabelled `Change` -> `Change Folder` (`bl_label` already
+      "Change Models Folder"); README-2.md:106 renamed. Tests +7: `tests/test_transfers.py` (3, incl. the
+      live-engine case that must stay `active`), new `tests/test_bridge_busy_gate.py` (3 -- button and
+      operator agree), `tests/test_ui_transfer_controls.py` (1 AST case pinning the label, the reason text,
+      `has_active_jobs`, and `not busy`). Suite Ran 85, 0 failed (78 before); `compileall` exit 0;
+      `graphify update .` 1024 nodes / 2732 edges / 46 communities; installed `%APPDATA%` copy hash-equal
+      (ui 262A06A2DBA8, ui_helpers 878F9E7683F3, transfers 784CB428360B, bridge 6A85FAA1DE2B); Blender
+      5.2.3 `-b` starts clean (no sculptr error, no crash). NOT verified: the rendered drawer on the user's
+      live journals -- the only record on disk now is `t-284ef2be...` state `discarded` (busy False), so the
+      stuck record came from a rotated session. Details: `.handoff/log/2026-11-18-b8qm.md` 14:33.
+
 - [x] T-034 Downloads that reach ~100% then restart at 0 forever -- fixed at `sculptr/engine/hub.py`.
       Cause: `_remote_file` set `git_sha1 = sibling["blobId"]` for every file and ignored
       `sibling["lfs"]`, but for an LFS/XET file `blobId` is the SHA-1 of the ~135-byte POINTER text

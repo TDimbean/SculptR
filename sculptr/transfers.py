@@ -481,8 +481,37 @@ class TransferStateJournal:
         return self.update(record, **changes)
 
 
-def merged_records(models_root: os.PathLike[str] | str) -> list[dict[str, Any]]:
-    """Intent joined with engine state, for UI display when no engine is running."""
+def _reconciled_state(request: Any, state: Any, *, engine_alive: bool) -> Any:
+    """The state to report for `state` when no engine can advance it any more.
+
+    A live engine reacts to a pause or a discard inside the chunk it is writing
+    and rewrites its own state, so the state journal is authoritative. A session
+    that died first leaves the record `queued`/`active`/`verifying` forever and
+    nothing will ever fix it, which is what makes the UI read a download that no
+    process owns: the panel keeps saying a transfer is running, blocks the models
+    folder for good, and no Pause or Cancel can change that. With no engine, the
+    intent journal is the last word the user got, so it decides the reported
+    state. Callers that read the journals for the engine keep the default.
+    """
+    if engine_alive or state not in RESUMABLE_STATES:
+        return state
+    if request == PAUSED:
+        return PAUSED_STATE
+    if request == DISCARDED:
+        return DISCARDED_STATE
+    return state
+
+
+def merged_records(
+    models_root: os.PathLike[str] | str, *, engine_alive: bool = True
+) -> list[dict[str, Any]]:
+    """Intent joined with engine state, for UI display when no engine is running.
+
+    `engine_alive` says whether a process still owns the state journal; the gate
+    that blocks a models-folder change must not depend on that, only on whether
+    the user still wants the bytes, so a state nothing will advance is reported
+    through the intent instead (see `_reconciled_state`).
+    """
     states = TransferStateJournal(models_root).iter()
     by_id: dict[str, dict[str, Any]] = {}
     for record in states:
@@ -497,21 +526,27 @@ def merged_records(models_root: os.PathLike[str] | str) -> list[dict[str, Any]]:
             # still shows every transfer it can verify.
             continue
         state = by_id.pop(identifier, None)
+        request = intent.get("request")
         record = {
             "transfer_id": identifier,
             "model_id": str(intent.get("model_id") or ""),
-            "intent_request": intent.get("request"),
+            "intent_request": request,
             "authorization": intent.get("authorization") or {},
             "pinned": intent.get("pinned") or [],
         }
         if state:
+            reported = _reconciled_state(request, state.get("state"), engine_alive=engine_alive)
+            # A state the engine never got to write has no engine phase or
+            # message of its own: showing both would describe a process that is
+            # gone, next to a state that says the user stopped it.
+            reconciled = reported != state.get("state")
             record.update(
                 {
                     "attempt_id": state.get("attempt_id"),
-                    "state": state.get("state"),
-                    "phase": state.get("phase"),
-                    "message": state.get("message"),
-                    "error_code": state.get("error_code"),
+                    "state": reported,
+                    "phase": reported if reconciled else state.get("phase"),
+                    "message": "" if reconciled else state.get("message"),
+                    "error_code": None if reconciled else state.get("error_code"),
                     "files": state.get("files") or {},
                     "completed_bytes": state.get("completed_bytes") or 0,
                     "total_bytes": state.get("total_bytes") or 0,
@@ -522,7 +557,7 @@ def merged_records(models_root: os.PathLike[str] | str) -> list[dict[str, Any]]:
         else:
             record.update(
                 {
-                    "state": QUEUED if intent.get("request") == REQUESTED else intent.get("request"),
+                    "state": QUEUED if request == REQUESTED else request,
                     "completed_bytes": 0,
                     "total_bytes": 0,
                     "files": {},

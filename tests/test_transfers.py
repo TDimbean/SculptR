@@ -25,6 +25,7 @@ from sculptr.transfers import (
     QUEUED,
     REQUESTED,
     RETRYING,
+    VERIFYING,
     IntentJournal,
     JournalError,
     TransferStateJournal,
@@ -314,13 +315,55 @@ class MergedRecordTests(unittest.TestCase):
         self.assertIsNone(merged[0]["intent_request"])
         self.assertEqual(merged[0]["state"], QUEUED)
 
-    def test_unnamed_journal_files_are_skipped(self):
-        intent_directory(self.root).mkdir(parents=True, exist_ok=True)
-        (intent_directory(self.root) / "t-dead.json").write_text(
-            json.dumps({"schema": 1, "transfer_id": "t-dead", "model_id": "x", "request": REQUESTED}),
-            encoding="utf-8",
+    def test_a_dead_engine_leaves_no_download_running_for_a_stopped_transfer(self):
+        """Pause or discard survives a crash: the panel must not report a download that no process owns.
+
+        The engine rewrites its own state when it reacts to a pause; a session
+        that died never gets to, so the merge has to read the intent instead, or
+        the Folder panel stays busy forever and blocks the models folder.
+        """
+        intent = self.intents.record(
+            "test-model", spec(b"x"), license_required=False, license_authorized=True
         )
-        self.assertEqual(merged_records(self.root), [])
+        record = self.states.begin(
+            intent, [{"local_path": "w.bin", "size": 10}], attempt_id="a", session_id="s"
+        )
+        self.states.update(record, state=ACTIVE, phase="downloading", message="Writing bytes")
+        self.intents.set_request(intent["transfer_id"], PAUSED)
+        stopped = merged_records(self.root, engine_alive=False)[0]
+        self.assertEqual(stopped["state"], PAUSED_STATE)
+        self.assertEqual(stopped["phase"], PAUSED_STATE)
+        self.assertEqual(stopped["message"], "")
+        self.assertEqual(stopped["completed_bytes"], 0)
+        # A live engine still owns its resumable state: it pauses within the
+        # chunk it is writing, and until then the bytes really are in flight.
+        self.assertEqual(merged_records(self.root)[0]["state"], ACTIVE)
+
+    def test_a_discarded_transfer_reports_discarded_once_the_engine_is_gone(self):
+        intent = self.intents.record(
+            "test-model", spec(b"x"), license_required=False, license_authorized=True
+        )
+        record = self.states.begin(
+            intent, [{"local_path": "w.bin", "size": 10}], attempt_id="a", session_id="s"
+        )
+        self.states.update(record, state=VERIFYING, phase="verifying", message="Checking hash")
+        self.intents.set_request(intent["transfer_id"], DISCARDED)
+        self.assertEqual(
+            merged_records(self.root, engine_alive=False)[0]["state"], DISCARDED_STATE
+        )
+
+    def test_a_transfer_the_user_never_stopped_stays_busy_without_an_engine(self):
+        """A queued download the user still wants keeps the folder locked."""
+        intent = self.intents.record(
+            "test-model", spec(b"x"), license_required=False, license_authorized=True
+        )
+        record = self.states.begin(
+            intent, [{"local_path": "w.bin", "size": 10}], attempt_id="a", session_id="s"
+        )
+        self.states.update(record, state=VERIFYING)
+        self.assertEqual(
+            merged_records(self.root, engine_alive=False)[0]["state"], VERIFYING
+        )
 
 
 class OffsetReconciliationTests(unittest.TestCase):

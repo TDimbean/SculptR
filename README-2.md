@@ -103,7 +103,7 @@ Open the **Models** tab in the SculptR sidebar. The default location is Blender'
 sculptr/models
 ```
 
-Use **Change** to select another existing folder. SculptR will not switch folders while jobs are active.
+Use **Change Folder** to select another existing folder. SculptR will not switch folders while a download is still writing bytes; pause or cancel one first, and a transfer you have already paused or discarded leaves the folder free to change.
 
 ### 2. Download the required model entries
 

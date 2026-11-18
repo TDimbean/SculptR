@@ -513,7 +513,7 @@ class SCULPTR_PT_folder(_SculptRChildPanel, bpy.types.Panel):
         busy = has_active_jobs(_SNAPSHOT)
         change = buttons.column()
         change.enabled = not busy
-        change.operator("sculptr.change_models_folder", text="Change", icon="FILE_FOLDER")
+        change.operator("sculptr.change_models_folder", text="Change Folder", icon="FILE_FOLDER")
         open_folder = buttons.column()
         open_folder.enabled = path.is_dir()
         open_folder.operator("sculptr.open_models_folder", text="Open in Explorer", icon="DISCLOSURE_TRI_RIGHT")

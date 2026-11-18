@@ -236,3 +236,83 @@
   `hunyuan_digest_probe.py` (both checkpoints hashed), `hub_copy_probe.py` (the fix exercised inside
   the INSTALLED copy Blender loads). Test-side: `ServerBehaviour(stored_as_pointer=True)` in
   `tests/support.py` makes the fake CDN report a pointer sibling exactly as the real API does.
+
+## 2026-11-18 (session 2026-11-18-b8qm)
+
+- Decision: the busy gate is expressed against the user's intent, not only the engine's state journal --
+  `merged_records(models_root, *, engine_alive=True)` reports a state nothing can advance through the
+  intent (`_reconciled_state`: PAUSED intent over a resumable state -> `paused`, DISCARDED -> `discarded`,
+  and the engine's phase/message cleared because they describe a process that is gone). WHY: the state
+  journal has exactly ONE writer (the engine, transfers.py docstring:13-14), so a session that died mid-chunk
+  leaves `queued`/`active`/`verifying` forever and no Pause or Cancel can change what the panel reads --
+  the reported symptom was exactly that: a red "Download running" alert, a grey Change button, and the
+  advice to pause a download that cannot run. The job side of the same rule already existed
+  (`_has_active_job` clears a dead engine's pending claims, bridge.py:677-681); this is the transfer side.
+- Decision: liveness is part of the transfer-record cache key in `BridgeClient.transfer_records`
+  (`_transfers_alive`, bridge.py:176 init / :354 configure reset / :527 check). WHY: the merged records now
+  depend on whether an engine is running, and the 1s cache would otherwise serve a pre-start/post-exit merge.
+- Decision: a transfer the user never stopped keeps the folder locked even with no engine (intent `requested`
+  + state `queued`/`active` stays busy). WHY: those bytes belong to that models folder and the next engine
+  resumes them from the journal -- the design intent recorded in `ui_helpers.has_active_jobs`.
+- Gotcha: `sculptr/ui.py` Folder drawer draws ONE gate for two symptoms -- `ui.py:512-528`
+  `busy = has_active_jobs(_SNAPSHOT)` sets `change.enabled` and the red hint together, so a wrong gate
+  explains "button always grey" and "alert always on" at once. Fix the predicate, not the two call sites.
+- Gotcha: Blender 5.2.3 rejects `--vanilla` and `--python-at-exit` ("unknown argument, loading as file"),
+  and `addon_utils.enable("sculptr", always_load=True)` raises `TypeError` there. The add-on registration
+  proof that works: `tests/test_extension_imports.py` (stubbed bpy) plus a clean `blender -b` start --
+  grep its output for `sculptr|Traceback|Error|Access violation`, empty means clean.
+- Gotcha: the models root's only transfer record on disk today is `t-284ef2be...` state `discarded`
+  (busy False), so a user screenshot showing `6.41 GB / 6.41 GB` and a full gauge cannot be reproduced
+  from the live journals -- the stuck record belongs to a session whose journals were rotated. Reproduce
+  against synthetic journals instead: `unsloth-tmp/busy_gate_probe.py` writes intent+state shapes copied
+  from the real files (both need `"schema": 1` or `iter()` skips them) and reads the merge back.
+- Dead end (do not repeat): do not fix this by making `ui_helpers.transfer_busy` ignore paused/stopped
+  transfers on its own, or by clearing the state journal from the bridge. The state journal has one writer
+  by design; the merge layer is the single reader every gate goes through, so the reconciliation lives there
+  and both the panel (`has_active_jobs`) and the operator (`has_busy_work`) agree by construction.
+- Pointers: gate layers -- `ui.py:512-528` (Folder drawer), `ui_helpers.has_active_jobs`/`transfer_busy`
+  (:358-:375), `bridge.has_busy_work`/`transfer_records`, `transfers.merged_records` + `_reconciled_state`;
+  new guard `tests/test_bridge_busy_gate.py` pins button-vs-operator agreement.
+
+## 2026-11-18 (session 2026-11-18-j4vt)
+
+- Decision: the Folder gate's JOB clause reads `IN_PROGRESS_STATUSES`, not `ACTIVE_STATUSES`
+  (`ui_helpers.py:378`). WHY: `ACTIVE_STATUSES` contains `paused` on purpose -- a paused download is
+  unfinished work, its row still shows progress and Resume is offered, and the engine keeps the
+  committed bytes -- but it does not claim a WRITER, and the gate asks "is anything writing the
+  models folder". The live root carries 7 job archives `status=paused` plus 32 completed / 18 failed /
+  13 not_downloaded / 5 installed / 1 cancelled, so the old clause kept the red hint and the grey
+  Change button on permanently after the user paused once; Pause was already pressed and Cancel never
+  rewrites the job archive. `bridge.py:90 ACTIVE_STATUSES` never contained `paused` ("terminal for a
+  job, the transfer behind it stays resumable"), so bridge + operator + `transfer_busy` already agreed.
+- Decision (guard shape): `tests/test_ui_folder_busy_gate.py` pins `paused` INSIDE `ACTIVE_STATUSES`
+  and OUT of `IN_PROGRESS_STATUSES`. WHY: a test that only asserted "paused does not block" would pass
+  if someone deleted `paused` from the unfinished set, which would silently break the progress row and
+  the Resume button; pinning both sets keeps the two vocabularities distinct and load-bearing.
+- Gotcha: there are TWO models roots and the running add-on uses the other one. `properties.py:16`
+  defaults `models_directory` to `bpy.utils.user_resource("DATAFILES", path="sculptr/models")` =
+  `C:\Users\r00st\AppData\Roaming\Blender Foundation\Blender\5.2\datafiles\sculptr\models`, and that
+  value is NOT persisted (`userpref.blend` 189292 B contains no path string, `preferences.prop` absent),
+  so every restart retargets the DATAFILES default. The hand-configured
+  `C:\Users\r00st\Documents\Projects\Local AI\SculptR_Models` stopped being written 2026-11-17 23:47.
+  Any journal read done from `%USERPROFILE%\Documents` alone describes a dead root.
+  Proof through the add-on's own accessor: live Blender 5.2.3 `-b --python unsloth-tmp/blender_gate_check.py`
+  prints `models_directory` = the DATAFILES root.
+- Gotcha: an earlier filesystem scan of `%APPDATA%` was never run, and a
+  `glob **/downloads/state/*.json` under `C:\Users\r00st` times out (30 s); walk the Blender subtree
+  explicitly with `os.scandir` instead (`appdata_root_probe.py`, `gate_replay.py`).
+- Gotcha: the installed extension copy `%APPDATA%\Blender Foundation\Blender\5.2\extensions\user_default\sculptr`
+  can lag the repo, and a probe that does `sys.path.insert(0, ...extensions\user_default)` then
+  `import sculptr.X` exercises the STALE copy, not the repo edit -- that is what made the first
+  replay print `has_active_jobs=True` after the fix landed. After every code edit run
+  `unsloth-tmp/sync_installed.py` (copies all 11 files repo -> extension and hashes both sides)
+  before any live-blender or installed-import probe.
+- Dead end (do not repeat): the second screenshot's alert is NOT explained by the transfer merge.
+  Root B's 5 merged transfers were all `installed` and busy False for `engine_alive` True and False
+  (labels `Saved 7.47 GB of 7.47 GB`, ..., `Saved 0 B of 7.47 GB`); the truth came from the job clause
+  of `has_active_jobs`. Reading only transfers again wastes a pass.
+- Pointers: job-status side of the gate -- `ui_helpers.py` sets at :24-:41 and the clauses at
+  :373-:378, `bridge.py:90` (its own ACTIVE/TERMINAL sets), `bridge._has_active_job` :674-:686
+  (dead engine clears `_pending`), `bridge._active_download_job` :688-:696 (KEEPS `paused` in scope:
+  that is the job the user acts on); job archives live at `<root>/.sculptr/jobs/*.json` and their
+  `status` vocabulary is `{paused, installed, failed, cancelled, completed, not_downloaded}`.

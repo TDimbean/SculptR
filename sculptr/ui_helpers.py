@@ -18,9 +18,12 @@ from .transfers import (
 )
 
 IMAGE_EXTENSIONS = frozenset({".jpeg", ".jpg", ".png", ".webp"})
-# The transfer journal vocabulary. `paused` is deliberately included: a paused
-# transfer still owns resumable bytes, so changing the models folder or stopping
-# the engine while it exists is exactly how a multi-GB download loses its place.
+# The transfer journal vocabulary. `paused` belongs here: the user has not
+# finished with the transfer, so its rows still show progress, Resume is offered,
+# and the engine keeps the committed bytes. What the paused state does NOT do is
+# claim a writer: nothing is writing, so the gate that blocks a models-folder
+# change reads `IN_PROGRESS_STATUSES` instead — the bridge already treats a
+# paused job as terminal (`ACTIVE_STATUSES` there omits `paused`).
 ACTIVE_STATUSES = frozenset(
     {
         "checking",
@@ -362,13 +365,17 @@ def transfer_busy(record: Mapping[str, Any]) -> bool:
 
 
 def has_active_jobs(snapshot: Mapping[str, Any]) -> bool:
-    """True while a job is live or a transfer could still write bytes.
+    """True while work is still making progress or bytes are still owed.
 
-    Resumable transfers count even with no engine: the bytes belong to that
-    models folder, and retiring the engine mid-write is how progress is lost.
+    `IN_PROGRESS_STATUSES`, not `ACTIVE_STATUSES`: a paused download stopped
+    by the user writes nothing, so it must not hold the models folder hostage
+    forever — that is what made the Folder panel report "Download running"
+    with nothing running and grey the change button with no way out. The
+    engine side agrees: `BridgeClient._has_active_job` reads its own set,
+    which omits `paused`, and `transfer_busy` already excludes it.
     """
     if any(
-        normalize_status(job.get("status")) in ACTIVE_STATUSES for job in iter_jobs(snapshot)
+        normalize_status(job.get("status")) in IN_PROGRESS_STATUSES for job in iter_jobs(snapshot)
     ):
         return True
     return any(transfer_busy(record) for record in iter_transfers(snapshot))
