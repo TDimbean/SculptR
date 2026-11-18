@@ -355,12 +355,6 @@ def saved_bytes_label(record: Mapping[str, Any]) -> str:
     return "No bytes saved yet"
 
 
-def transfer_resumable(record: Mapping[str, Any]) -> bool:
-    """A transfer the user can legitimately press Resume on."""
-    state = normalize_status(read_field(record, "state", ""))
-    return state not in IN_PROGRESS_STATUSES and state not in {"installed", "discarded"}
-
-
 def transfer_busy(record: Mapping[str, Any]) -> bool:
     """The engine may still be writing bytes for this transfer."""
     state = str(read_field(record, "state", "") or "")

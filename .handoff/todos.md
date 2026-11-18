@@ -8,6 +8,9 @@
       removed `hunyuan_license_confirmed` property can leave that key in an existing
       `preferences.prop`, whose warn-and-ignore behaviour needs one live enable/disable cycle to
       confirm. Needs the user to load the add-on in Blender 5.2 and report the two boxes.
+      - 09:05 partial progress from T-028: the MODELS-tab SECTION STRUCTURE is now proven in live
+        Blender 5.2 batch (Folder / License / Models as three child panels, real scene poll), so what
+        is still unverified is only the rendered label text and wrapping inside the License section.
 - [x] T-021 Repo cleanup -- closed 20:31. Deleted the 8 orphan scratch files (diag.txt, eng-run.txt,
       hub-run.txt, proc-run.txt, test-run.txt, tr-run.txt, scratch_diag.py, scratch_lock.py); emptied
       unsloth-tmp (280 to 0 children) and kept the directory because it is the harness temp redirect;
@@ -18,6 +21,108 @@
 
 ## Done
 
+- [x] T-033 Stall/failure notices no longer move the card -- the "connection ended at ..."
+      row flickered in and out and slid the progress bar and buttons one line. Cause:
+      the reason was drawn by `if error_code: card.label(...)` (model card, `ui.py:579`) and
+      `if reason: card.label(...)` (`_draw_transfer_rows`, `ui.py:260`) -- a row that only
+      exists when a message exists, drawn below `card.progress(...)`. Fix, same shape in both
+      drawers: `reason_row = card.row()` made outside any condition, message label in the `if`,
+      `NOTICE_SLOT` label in the `else` (`NOTICE_SLOT = " "`, `ui.py:42`, whitespace so the line
+      is claimed but no words show), whole block moved above `card.progress(...)` so the reason
+      reads under the status line and above the bar. No `alert` set, so the look (warning-triangle
+      icon, untinted row) stays as before. Guard `tests/test_ui_reason_slots.py` (3 AST cases:
+      row made once, never inside a condition, labelled twice; labels precede the `progress` call
+      and no `card.label(` left on the box; the slot is whitespace, not empty) — sensitivity
+      proved with `unsloth-tmp/guard_slot_proof.py`, which re-ran the guard on three broken
+      variants and got one failure each ("builds the row inside a condition", "596 not less than
+      588 ... below the progress bar", "'' == '' : an empty label claims no height"). Suite Ran
+      75 tests, 0 failed (was 72); `compileall` exit 0; Blender 5.2 batch probe loads the new
+      ui.py (`scene properties: True`, exit 0); installed copy re-synced at
+      `%APPDATA%\Roaming\Blender Foundation\Blender\5.2\extensions\user_default\sculptr`
+      (path is `Blender\5.2`, not `Blender 5.2`) — `ui.py` 704B99A2ABD890A1... equal both trees.
+      `graphify update .` = 986 nodes / 2614 edges / 52 communities. NOT verified: the rendered
+      height -- the guard pins the draw shape, not pixels; a live GUI look at a message-free card
+      is still open (T-026). Details: `.handoff/log/2026-11-18-n6rq.md` 11:26 section.
+- [x] T-032 Download controls only on the model card -- the transfer row under the Folder
+      tab and the model card under Models both offered controls for one transfer
+      (`Resume | Pause | Discard` on the Downloads (n) card vs `Cancel | Pause | Check` on
+      the card). Fix in `sculptr/ui.py`: `_draw_transfer_rows` lost its whole `actions` block
+      and its unused `transfer_id` local, keeping only the report rows
+      (`Downloads (n)`, name + size, status, progress bar, reason, `Saved x of y` +
+      `Attempt n`) because that is engine state the card lacks; `SCULPTR_PT_models.draw`
+      gained the delete control on its `actions` row -- `Discard`, or `Confirm Discard |
+      Keep` while `discard_armed(transfer_id)`, gated `transfer_id and status not in
+      {"installed", "discarded"}` so a finished transfer shows no dead button. The two-step
+      discard (arm/confirm, `ui.py:58-75` + `operators.py:509`) preserved. `transfer_resumable`
+      deleted from the ui.py imports and from `ui_helpers.py` (repo-wide grep: nothing else
+      called it). Guard `tests/test_ui_transfer_controls.py` (4 AST cases: download rows press
+      no controls; the three lifecycle operators belong to exactly one unit, the card, and
+      nowhere else; the card keeps the two-step pair and reads `discard_armed`; the dead helper
+      is gone) — sensitivity proved with `unsloth-tmp/guard_proof.py`. Suite Ran 72 tests, 0
+      failed; `compileall` exit 0; installed `%APPDATA%` copy re-synced after a diff proved the
+      copies differed only by this change (`ui.py` 61DF0EC7710B..., `ui_helpers.py`
+      71E604097ACA... both trees); Blender 5.2.3 batch loads the new ui.py clean (exit 0,
+      `Blender quit`, no crash file). README-2.md section 2 documents the card controls.
+      `graphify update .` = 974 nodes / 2598 edges / 46 communities. NOT verified: the rendered
+      rows, including the armed five-column card row width. Details:
+      `.handoff/log/2026-11-18-n6rq.md`.
+- [x] T-031 Blender clipped the one-row message with "..." -- after T-030 the hint read as
+      "A download is still running. Pause ...before changing the models folder.": one row, one
+      icon, but the ellipsis is Blender's own mid-elision, so it still looked split. A panel
+      label never widens its drawer; the row keeps the width the button rows asked for, and an
+      overflowing label loses its middle (90 chars needed ~576 px, the row had ~470 px at
+      ~6.3 px/glyph -> capacity ~70-75 glyphs; capacity is per panel, the Models tab is wider
+      because of its name+size row). Fix: hint shortened to 64 chars
+      "Download running. Pause or cancel it before changing the folder." (`sculptr/ui.py:540`)
+      with a comment stating the width rule. Guard extended: `MAX_LABEL_CHARS = 70` plus the
+      text must still be present. Suite Ran 68 tests, 0 failed; `compileall` exit 0; installed
+      `%APPDATA%` ui.py sha256 49A1C41DE002... both trees; `graphify update .` refreshed.
+      Web search for Blender elision reports returned only appliance results -- findings
+      unusable, so the fix rests on the screenshot measurement. NOT touched: engine notices in
+      the same drawer can exceed 70 glyphs (`operators.py:500` ~103, `:557` ~72). Details:
+      `.handoff/log/2026-11-18-t4kx.md`.
+
+- [x] T-030 One message = one label -- the red Folder-panel hint still read as two stacked
+      rows, each with its own icon ("A download is still running. Pause or cancel" /
+      "it before changing the models folder."); one row per fragment was not enough. Fix in
+      `sculptr/ui.py`: all five message sites draw ONE label so the row stretches to the text,
+      matching the Hunyuan `Paused -- resume when ready: ...` row -- engine notice, the busy
+      hint, `_draw_engine_failure` first line, the transfer-card reason (now `if reason:` so
+      an empty reason still prints nothing), the Models-tab card error. `_wrap_text` deleted:
+      nothing feeds it, and a dead splitter is debt. Guard rewritten: no `for` loop may draw
+      its own loop variable through `.label(...)`, the splitter name must not survive, and the
+      hint text must stay. Suite Ran 68 tests, 0 failed; `compileall` exit 0; installed
+      `%APPDATA%` ui.py sha256 7ECE43D829AD... both trees; `graphify update .` = 964 nodes /
+      2588 edges / 45 communities. Rendered rows not verified. Details:
+      `.handoff/log/2026-11-18-t4kx.md`.
+
+- [x] T-029 Split notification messages -- a hand-wrapped notice was drawn as several clipped
+      columns on ONE row, each with its own icon (screenshots: engine notice under "Engine
+      running", and the red "A download is still running..." line under Change / Open in
+      Explorer). Cause: `row.label()` called per wrapped line puts every label side by side in
+      that row; `ui.py:202` `notice_row = layout.row()` and `ui.py:554` `hint = layout.row()`
+      sat OUTSIDE the `for line in _wrap_text(...)` loop. Fix: `.row()` + its `alert` moved
+      inside both loops, one row per line; `icon="INFO"` and alert state unchanged. The three
+      `box.label()` loops (failure message, transfer-card reason, model-card error) already
+      mint a row per call, so they were left alone. Guard `tests/test_ui_notice_rows.py`;
+      suite Ran 68 tests, 0 failed; `compileall` exit 0; installed `%APPDATA%` ui.py re-synced
+      (both sha256 EA464B03AB47...); `graphify update .` = 971 nodes / 2603 edges / 47
+      communities. Rendered pixels not verified (no live panel here). Details:
+      `.handoff/log/2026-11-18-t4kx.md`.
+
+- [x] T-028 License as its own section -- the Models-tab license notice moved out of the
+      Models card list into a sibling child panel `SCULPTR_PT_license` (`ui.py`): `bl_parent_id`
+      `SCULPTR_PT_root`, `bl_label` "License", `bl_order` 1, so MODELS sections now render
+      Folder (0) / License (1) / Models (2) and each is collapsible. `SCULPTR_PT_models` now
+      `bl_order` 2 and draws only model cards; `CLASSES` gained the new class; label text unchanged.
+      Verified in Blender 5.2.3 batch (`blender -b --python unsloth-tmp/panel_sections.py`, real
+      `bpy.context.scene.sculptr`): `sections for MODELS : ['Folder (order 0)', 'License (order 1)',
+      'Models (order 2)']`, GENERATE unchanged, clean quit, crash-file mtime still 08:32:29.
+      Installed `%APPDATA%` copy re-synced (both sha256 28103b042d78...). New guard test
+      `tests/test_ui_panel_sections.py`; suite Ran 67 tests, 0 failed; `compileall` exit 0.
+      `graphify update .` refused (958 vs 965 nodes) and left graph.json untouched, so the graph
+      is now stale for the new class (grep `SCULPTR_PT_license` in `graphify-out/graph.json` = no
+      matches). Details: `.handoff/log/2026-11-18-p9mc.md`.
 - [x] T-027 Crash on Blender quit -- closed 08:52. Blender stopped working on exit and wrote
       `%TEMP%\blender.crash.txt`. Cause `sculptr/bridge.py` `__del__` -> `stop("__del__")` ->
       `_log_event` -> `event` -> `diagnostics.py:111` `datetime.now()`: Blender clears its modules at

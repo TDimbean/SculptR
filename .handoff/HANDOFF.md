@@ -18,8 +18,88 @@
 
 ## Status
 
-- **Last updated:** 2026-11-18 08:52 -- session 2026-11-18-w7fk (Blender quit crash fixed: once-only shutdown)
-- **Side fix this hour (w7fk):** Blender stopped working on exit and wrote
+- **Last updated:** 2026-11-18 11:26 -- session 2026-11-18-n6rq (transfer notices now hold a reserved line above the progress bar, so nothing slides)
+- **Notice rows, reserved (n6rq, T-033):** the transfer reason is one row that exists every frame --
+  `reason_row = card.row()` outside any condition, message in the `if`, `NOTICE_SLOT` (`ui.py:42`, `" "`) in
+  the `else`, drawn under the status line and above `card.progress(...)` in both the model card and the
+  Downloads rows. `tests/test_ui_reason_slots.py` (3 AST cases) pins that shape; proof of sensitivity:
+  `unsloth-tmp/guard_slot_proof.py` re-ran it on three broken variants, one failure each. Suite Ran 75,
+  0 failed; Blender 5.2 batch loads the new ui.py; installed `%APPDATA%\...\Blender\5.2\extensions\user_default\sculptr`
+  re-synced (`ui.py` 704B99A2ABD890A1...). NOT verified: rendered height -- see T-026. Details:
+  `.handoff/log/2026-11-18-n6rq.md` 11:26.
+- **Transfer controls, one owner (n6rq, T-032):** a transfer's actions are pressed from its model card and
+  nowhere else. `_draw_transfer_rows` (`sculptr/ui.py:225`) is observation-only now -- no `actions` row, no
+  `transfer_id` local -- keeping `Downloads (n)`, name + size, status, progress bar, reason, `Saved x of y`
+  + `Attempt n`. `SCULPTR_PT_models.draw` carries `Discard` next to `Check` (`Confirm Discard | Keep` while
+  `discard_armed`, gated out for `installed` / `discarded`), so the two-step delete invariant survived the move.
+  `transfer_resumable` deleted from `ui.py` imports and `ui_helpers.py` (nothing else called it). Guard
+  `tests/test_ui_transfer_controls.py` (4 AST cases) + sensitivity proof `unsloth-tmp/guard_proof.py`;
+  suite Ran 72 tests, 0 failed; `compileall` exit 0; repo and installed `%APPDATA%` copies hash equal
+  (`ui.py` 61DF0EC7710B..., `ui_helpers.py` 71E604097ACA...); Blender 5.2.3 batch imports the new ui.py
+  (exit 0, `Blender quit`, no crash file). NOT verified: the rendered rows -- worst case is the armed
+  five-column card row, and it moved from the narrower Folder drawer to the wider Models drawer. Details:
+  `.handoff/log/2026-11-18-n6rq.md`, todo T-032.
+- **Earlier state (t4kx, 10:02):** Folder hint fits its row; Blender no longer elides it
+- **Panel notices, current state (t4kx, T-031):** a one-label message must ALSO fit the drawer,
+  or Blender replaces its middle with "..." and it reads as split text again. The Folder-panel
+  row is only ~470 px wide (set by the "Change" / "Open in Explorer" buttons, ~6.3 px/glyph,
+  so ~70-75 glyphs). The 90-char hint was shortened to 64 chars:
+  `Download running. Pause or cancel it before changing the folder.` (`sculptr/ui.py:540`), with a
+  comment stating the rule. Guard `tests/test_ui_notice_rows.py` now pins that text AND `MAX_LABEL_CHARS = 70`.
+  Suite Ran 68 tests, 0 failed; `compileall` exit 0; repo and installed
+  `%APPDATA%\...\sculptr\ui.py` both sha256 49A1C41DE002...; `graphify update .` refreshed.
+  NOT verified: the rendered row -- no live Blender panel render here.
+  Open same-class risk (untouched, wording change needs approval): engine notices drawn in that
+  same drawer -- `sculptr/operators.py:500` resume notice ~103 glyphs, `:557` discard notice ~72.
+  Earlier state (T-029 + T-030) and its sha256 7ECE43D829AD... are history in
+  `.handoff/log/2026-11-18-t4kx.md`.
+- **Panel notices, final state (t4kx, T-029 + T-030):** a notification message in the sidebar
+  must be ONE label on ONE row with ONE icon, like the Hunyuan
+  `Paused -- resume when ready: Paused by user; committed bytes kept` row. Both reported symptoms
+  came from `sculptr/ui.py` splitting text before drawing it: `row.label()` per wrapped fragment
+  put the fragments side by side in one row (each clipped, each with an `INFO` icon), and one-row-
+  per-fragment left N stacked rows with N icons. Fix: the five message sites -- engine notice, the
+  Folder-panel busy hint ("A download is still running. Pause or cancel it before changing the
+  models folder."), `_draw_engine_failure` first line, the transfer-card reason (guarded `if
+  reason:` so an empty reason still prints nothing), and the Models-tab card error -- each draw a
+  single label and a Blender row stretches to it. The `_wrap_text` helper is deleted (nothing feeds
+  it; keeping a dead splitter is debt). Guard `tests/test_ui_notice_rows.py`: fails if any `for`
+  loop draws its own loop variable through `.label(...)`, if the splitter name survives, or if the
+  hint text is missing. Suite Ran 68 tests, 0 failed; `compileall` exit 0; installed
+  `%APPDATA%\Blender Foundation\Blender\5.2\extensions\user_default\sculptr\ui.py` sha256
+  7ECE43D829AD... both trees; `graphify update .` = 964 nodes / 2588 edges / 45 communities.
+  NOT verified: the rendered rows -- no live Blender panel render here. Details:
+  `.handoff/log/2026-11-18-t4kx.md`, todos T-029 and T-030.
+- **Side fix this hour (t4kx):** a notification message that `_wrap_text` splits was drawn as
+  several clipped columns on ONE row, each with its own icon (engine notice under "Engine
+  running", plus the red "A download is still running. Pause or cancel it before changing the
+  models folder." under Change / Open in Explorer). Cause `sculptr/ui.py`: `notice_row =
+  layout.row()` (202) and `hint = layout.row()` (554) sat OUTSIDE the `for line in _wrap_text(...)`
+  loop, and Blender lays every `row.label()` side by side. Fix: the `.row()` plus its `alert`
+  moved inside both loops, so each wrapped line is its own row; `icon="INFO"`, alert state, and
+  the message text unchanged. The three `box.label()` loops already mint a row per call, untouched.
+  Guard `tests/test_ui_notice_rows.py` (AST scan per function scope; the deliberate model-card
+  `title.label` name+size pair stays legal). Suite Ran 68 tests, 0 failed; `compileall` exit 0;
+  installed `%APPDATA%` ui.py re-synced (both sha256 EA464B03AB47...) after a diff proved the
+  copies differed only by this fix; `graphify update .` rebuilt 971 nodes / 2603 edges / 47
+  communities (p9mc's refusal recovered). NOT verified: the rendered sidebar pixels -- no live
+  panel here. Details: `.handoff/log/2026-11-18-t4kx.md`, todo T-029.
+- **Side fix this hour (p9mc):** the Models-tab license notice is now its own collapsible
+  sidebar section instead of loose rows above the model cards. `sculptr/ui.py`: new child panel
+  `SCULPTR_PT_license` (`bl_parent_id = "SCULPTR_PT_root"`, `bl_label` "License", `bl_order` 1,
+  poll `active_tab == "MODELS"`, the five label lines drawn on `self.layout` with text unchanged);
+  `SCULPTR_PT_models` renumbered to `bl_order` 2 and its `license_box = layout.box()` rows deleted,
+  so the notice lives in exactly one section; `CLASSES` extended. README-2.md line 42 reworded to
+  name the License section. Verified in Blender 5.2.3 batch (`blender -b --python unsloth-tmp/panel_sections.py`):
+  `sections for MODELS : ['Folder (order 0)', 'License (order 1)', 'Models (order 2)']` against the
+  real `bpy.context.scene.sculptr`, GENERATE tab unchanged, clean quit and the crash file keeps
+  mtime 08:32:29. Installed `%APPDATA%` copy re-synced (ui.py sha256 `28103b042d78...` both trees).
+  Guard test `tests/test_ui_panel_sections.py`; suite Ran 67 tests, 0 failed; `compileall` exit 0.
+  NOT refreshed: `graphify update .` refused ("new graph has 958 nodes but existing graph.json has
+  965 ... missing chunk files"), nothing written, so `graphify-out/graph.json` no longer knows
+  `SCULPTR_PT_license`; `--force` is documented for code-deleting refactors, not this. Details:
+  `.handoff/log/2026-11-18-p9mc.md`, todo T-028.
+- **Earlier this hour (w7fk):** Blender stopped working on exit and wrote
   `%TEMP%\blender.crash.txt`. Cause: at quit Blender clears its modules, which drops the last reference
   to the bridge singleton `_CLIENT`, so `sculptr/bridge.py` `__del__` ran `stop("__del__")` ->
   `_log_event` -> `event` -> `diagnostics.py:111` `datetime.now()` inside a finalizing CPython 3.13

@@ -27,7 +27,6 @@ from .ui_helpers import (
     status_label,
     storage_label,
     transfer_progress,
-    transfer_resumable,
     validate_image_path,
 )
 
@@ -37,6 +36,10 @@ _RUNTIME_ERROR = ""
 _ENGINE_NOTICE = ""
 _DISCARD_ARMED: dict[str, float] = {}
 _DISCARD_WINDOW_SECONDS = 20.0
+# An invisible label still claims a line, so a notice row keeps its height whether
+# or not a message fills it: nothing above the progress bar shifts when the engine
+# starts reporting a stalled transfer.
+NOTICE_SLOT = " "
 
 
 def runtime_snapshot():
@@ -73,22 +76,6 @@ def discard_armed(transfer_id: str) -> bool:
 
 def clear_discard(transfer_id: str) -> None:
     _DISCARD_ARMED.pop(transfer_id, None)
-
-
-def _wrap_text(text: str, width: int = 46) -> tuple[str, ...]:
-    """Panel labels do not wrap, so long explanations are broken by hand."""
-    words = str(text or "").split()
-    lines = []
-    current = ""
-    for word in words:
-        if current and len(current) + 1 + len(word) > width:
-            lines.append(current)
-            current = word
-        else:
-            current = f"{current} {word}" if current else word
-    if current:
-        lines.append(current)
-    return tuple(lines)
 
 
 def _age_label(epoch: Any) -> str:
@@ -199,10 +186,11 @@ def _draw_engine_status(layout):
             layout.label(text=f"Heartbeat {age}", icon="TIME")
     notice = engine_notice()
     if notice:
+        # One message, one row, one icon. A row stretches to its label, so the
+        # text needs no hand-splitting; splitting it would print a second icon.
         notice_row = layout.row()
         notice_row.alert = not alive
-        for line in _wrap_text(notice):
-            notice_row.label(text=line, icon="INFO")
+        notice_row.label(text=notice, icon="INFO")
     lifecycle = layout.row(align=True)
     start = lifecycle.column()
     start.enabled = not alive
@@ -222,8 +210,7 @@ def _draw_engine_failure(layout):
     box.alert = True
     message = str(read_field(failure, "message", "SculptR engine stopped"))
     code = str(read_field(failure, "error_code", read_field(failure, "reason", "")))
-    for line in _wrap_text(failure_message(code, message) or message):
-        box.label(text=line, icon="ERROR")
+    box.label(text=failure_message(code, message) or message, icon="ERROR")
     reason = str(read_field(failure, "reason", ""))
     if reason and reason != code:
         box.label(text=f"Reason: {reason}", icon="INFO")
@@ -239,10 +226,13 @@ def _draw_engine_failure(layout):
 
 
 def _draw_transfer_rows(layout):
-    """One row per durable transfer record; the engine owns the bytes, we only read.
+    """One row per durable transfer record: the engine owns the bytes, this only reads.
 
-    Resume/Pause/Discard call operators, never the bridge from here, so a redraw
-    cannot restart, stop, or delete anything.
+    This section is observation-only on purpose. Resume, Pause, and Discard live on
+    the model card in the Models section, so a transfer is never offered a second
+    set of controls here and a redraw cannot restart, stop, or delete anything. The
+    reason row is drawn every frame, empty slot included, so the bar and the counters
+    below it stay put when a message arrives.
     """
     records = list(iter_transfers(_SNAPSHOT))
     if not records:
@@ -251,7 +241,6 @@ def _draw_transfer_rows(layout):
     section.label(text=f"Downloads ({len(records)})", icon="IMPORT")
     for record in records[-6:]:
         state = normalize_status(read_field(record, "state", ""))
-        transfer_id = str(read_field(record, "transfer_id", ""))
         factor, saved, total = transfer_progress(record)
         retry = read_field(record, "retry", {})
         detail = str(read_field(record, "message", "") or "")
@@ -267,40 +256,20 @@ def _draw_transfer_rows(layout):
             text=status_label(state, factor, detail, retry if isinstance(retry, Mapping) else None),
             icon=status_icon(state),
         )
+        reason = failure_message(error_code, detail) if error_code else detail
+        reason_row = card.row()
+        if reason:
+            reason_row.label(text=reason, icon="ERROR" if state == "failed" else "INFO")
+        else:
+            reason_row.label(text=NOTICE_SLOT)
         if factor > 0.0 or state in IN_PROGRESS_STATUSES or state == "paused":
             card.progress(
                 factor=factor,
                 text=f"{format_bytes(saved)} / {format_bytes(total)}" if total else format_bytes(saved),
             )
-        reason = failure_message(error_code, detail) if error_code else detail
-        for line in _wrap_text(reason):
-            card.label(text=line, icon="ERROR" if state == "failed" else "INFO")
         saved_row = card.row()
         saved_row.label(text=saved_bytes_label(record), icon="FILE_FOLDER")
         saved_row.label(text=f"Attempt {attempt_count(record)}", icon="TIME")
-
-        actions = card.row(align=True)
-        resume = actions.column()
-        resume.enabled = transfer_resumable(record)
-        operator = resume.operator("sculptr.resume_transfer", text="Resume", icon="PLAY")
-        operator.transfer_id = transfer_id
-        pause = actions.column()
-        pause.enabled = state in IN_PROGRESS_STATUSES
-        operator = pause.operator("sculptr.pause_transfer", text="Pause", icon="PAUSE")
-        operator.transfer_id = transfer_id
-        if discard_armed(transfer_id):
-            confirm = actions.column()
-            confirm.alert = True
-            operator = confirm.operator("sculptr.discard_transfer", text="Confirm Discard", icon="TRASH")
-            operator.decision = "confirm"
-            operator.transfer_id = transfer_id
-            keep = actions.column()
-            operator = keep.operator("sculptr.discard_transfer", text="Keep", icon="CANCEL")
-            operator.decision = "keep"
-            operator.transfer_id = transfer_id
-        else:
-            operator = actions.operator("sculptr.discard_transfer", text="Discard", icon="TRASH")
-            operator.transfer_id = transfer_id
 
 
 
@@ -551,10 +520,30 @@ class SCULPTR_PT_folder(_SculptRChildPanel, bpy.types.Panel):
         if busy:
             hint = layout.row()
             hint.alert = True
-            for line in _wrap_text(
-                "A download is still running. Pause or cancel it before changing the models folder."
-            ):
-                hint.label(text=line, icon="INFO")
+            # One label, and short enough to fit this drawer: a label never widens a
+            # panel, and Blender replaces the middle of an overflowing label with "...".
+            hint.label(
+                text="Download running. Pause or cancel it before changing the folder.",
+                icon="INFO",
+            )
+
+
+class SCULPTR_PT_license(_SculptRChildPanel, bpy.types.Panel):
+    bl_idname = "SCULPTR_PT_license"
+    bl_label = "License"
+    bl_order = 2
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.sculptr.active_tab == "MODELS"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Review Hunyuan license", icon="INFO")
+        layout.label(text="This extension is only a hub for you to download and launch the models.")
+        layout.label(text="License for their use can only be granted by Tencent")
+        layout.label(text=f"Hunyuan 3D 2.1: {HUNYUAN_LICENSE_URL}")
+        layout.label(text=f"Hunyuan 3D 2.0: {HUNYUAN_V2_LICENSE_URL}")
 
 
 class SCULPTR_PT_models(_SculptRChildPanel, bpy.types.Panel):
@@ -568,13 +557,6 @@ class SCULPTR_PT_models(_SculptRChildPanel, bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        license_box = layout.box()
-        license_box.label(text="Review Hunyuan license", icon="INFO")
-        license_box.label(text="This extension is only a hub for you to download and launch the models.")
-        license_box.label(text="License for their use can only be granted by Tencent")
-        license_box.label(text=f"Hunyuan 3D 2.1: {HUNYUAN_LICENSE_URL}")
-        license_box.label(text=f"Hunyuan 3D 2.0: {HUNYUAN_V2_LICENSE_URL}")
-
         for model_id, model in _catalog_models():
             state = find_model_state(_SNAPSHOT, model_id)
             status = normalize_status(state.get("status"))
@@ -597,14 +579,21 @@ class SCULPTR_PT_models(_SculptRChildPanel, bpy.types.Panel):
             status_row.label(
                 text=status_label(status, progress, detail, retry), icon=status_icon(status)
             )
+            # The reason slot is drawn every frame, message or not: a row that only
+            # appears when the engine reports a stalled transfer pushes the bar and
+            # the buttons down, so the card reflows. It sits under the status line and
+            # above the bar, so the message reads as the status it explains.
+            reason = failure_message(error_code, detail) if error_code else ""
+            reason_row = card.row()
+            if reason:
+                reason_row.label(text=reason, icon="ERROR")
+            else:
+                reason_row.label(text=NOTICE_SLOT)
             if status in IN_PROGRESS_STATUSES or status == "paused":
                 card.progress(
                     factor=progress,
                     text=f"{format_bytes(saved)} / {format_bytes(total)}" if total else "",
                 )
-            if error_code:
-                for line in _wrap_text(failure_message(error_code, detail)):
-                    card.label(text=line, icon="ERROR")
 
             actions = card.row(align=True)
             primary = actions.column()
@@ -639,6 +628,31 @@ class SCULPTR_PT_models(_SculptRChildPanel, bpy.types.Panel):
             operator.action = "check"
             operator.model_id = model_id
 
+            # Deleting a transfer belongs to this card and nowhere else: the Downloads
+            # rows under the Folder tab only report what the engine is doing. The arm/
+            # confirm pair keeps one stray click from throwing away committed bytes.
+            if transfer_id and status not in {"installed", "discarded"}:
+                if discard_armed(transfer_id):
+                    confirm = actions.column()
+                    confirm.alert = True
+                    operator = confirm.operator(
+                        "sculptr.discard_transfer", text="Confirm Discard", icon="TRASH"
+                    )
+                    operator.decision = "confirm"
+                    operator.transfer_id = transfer_id
+                    keep = actions.column()
+                    operator = keep.operator(
+                        "sculptr.discard_transfer", text="Keep", icon="CANCEL"
+                    )
+                    operator.decision = "keep"
+                    operator.transfer_id = transfer_id
+                else:
+                    discard = actions.column()
+                    operator = discard.operator(
+                        "sculptr.discard_transfer", text="Discard", icon="TRASH"
+                    )
+                    operator.transfer_id = transfer_id
+
 
 CLASSES = (
     SCULPTR_PT_root,
@@ -647,5 +661,6 @@ CLASSES = (
     SCULPTR_PT_settings,
     SCULPTR_PT_enhance,
     SCULPTR_PT_folder,
+    SCULPTR_PT_license,
     SCULPTR_PT_models,
 )

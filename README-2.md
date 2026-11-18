@@ -39,7 +39,7 @@ Installing every catalog entry requires approximately **26.78 GB** before accoun
 
 ### Model licensing
 
-The Hunyuan catalog entries are marked as restricted in the catalog, and the Models tab and the Add-on page name their license pages. The hub states the authorization itself: it never asks you to accept anything and it never blocks a download because something is unaccepted. The catalog records these upstream license pages:
+The Hunyuan catalog entries are marked as restricted in the catalog, and the Models tab's own collapsible **License** section and the Add-on page name their license pages. The hub states the authorization itself: it never asks you to accept anything and it never blocks a download because something is unaccepted. The catalog records these upstream license pages:
 
 - [Hunyuan3D 2.1 license](https://huggingface.co/tencent/Hunyuan3D-2.1/blob/main/LICENSE)
 - [Hunyuan3D 2.0 license](https://huggingface.co/tencent/Hunyuan3D-2/blob/main/LICENSE)
@@ -108,6 +108,10 @@ Use **Change** to select another existing folder. SculptR will not switch folder
 ### 2. Download the required model entries
 
 Use **Download** beside each model you need. Downloads are staged in a `.partial` directory, can resume through HTTP range requests, and are verified before being moved into the final model directory.
+
+**Pause**, **Resume**, and **Discard** sit on the same model card, beside **Download** and **Check**; **Discard** deletes the transfer's downloaded bytes and needs a second click to confirm. The **Downloads (n)** rows under the **Folder** tab only report what the engine is doing — progress, saved bytes, and attempt count — and offer no controls of their own, so one card owns one transfer.
+
+When a transfer stalls or fails, the reason prints on its own line under the status, above the progress bar. That line holds its height even when there is nothing to report, so the bar and the buttons stay put when a message appears.
 
 Typical combinations are:
 

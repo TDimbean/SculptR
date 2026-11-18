@@ -22,6 +22,20 @@
 - 2026-11-15 Tests use stdlib `unittest` under `tests/` at repo root, importing the
   package through an explicit `importlib` alias because the package directory is
   `SculptR` while code refers to `sculptr` (works on case-insensitive Windows only).
+- 2026-11-18 One card owns one transfer's controls: Resume, Pause, Discard live on the
+  model card in the Models section; the `Downloads (n)` rows under the Folder tab only
+  report (status, progress bar, reason, `Saved x of y`, `Attempt n`). WHY: the same
+  action offered from two cards means two controls that can disagree about one transfer,
+  and the reader has to find which card matches what they are looking at; the
+  report-only half keeps the fields the model card does not carry (attempt count, the
+  transfer-side reason). `tests/test_ui_transfer_controls.py` pins the single owner.
+- 2026-11-18 A card's notice row is reserved and drawn above the progress bar, always,
+  with a whitespace label (`NOTICE_SLOT = " "`) when there is no message. WHY: a row that
+  exists only when a message exists slides the bar and the buttons one line on every
+  redraw, which reads as flicker; an empty label claims no height, so the placeholder has
+  to be whitespace rather than `""`. Position follows reading: the reason explains the
+  status, so it sits under the status line, not under the bar.
+  `tests/test_ui_reason_slots.py` pins the shape in both card drawers.
 
 ## Gotchas
 
@@ -140,3 +154,54 @@
 - Verification this session: `blender -b --python unsloth-tmp/blender_repro.py` crashes on the unfixed
   copy (crash file written, mtime 08:32:29) and exits clean on the fixed one; suite Ran 66 tests, 0 failed;
   `graphify update .` = 965 nodes / 2584 edges / 47 communities.
+
+## 2026-11-18 (session 2026-11-18-p9mc)
+
+- Decision: a collapsible sidebar section IS a child panel -- a class with
+  `bl_parent_id = "SCULPTR_PT_root"` and a `bl_order`. Blender 5.2 collects the registered
+  subclasses of the parent panel and draws each child behind its own disclosure row (the
+  "v Models" row in the screenshot), so putting the license notice in a `layout.box()` inside
+  the Models child panel would only nest it and keep it inside that section. See T-028.
+- Decision: distinct `bl_order` within one tab (MODELS: Folder 0, License 1, Models 2) rather
+  than reusing the neighbour's number. Why: a tie leaves the section order up to Blender's sort,
+  and the repo relies on the drawn order being the declared one.
+- Gotcha: Blender 5.2 offers no panel-tree helper for a batch probe -- `bpy.types.Panel`
+  exposes only `bl_rna_get_subclass` / `bl_rna_get_subclass_py` (`subclasses_all` is gone),
+  `bpy` has no `bpy.panel` module, and `bpy.utils.registered_classes()` does not exist. What
+  works: the extension is auto-enabled from the saved preferences in `blender -b`, so import
+  the installed package, read `sculptr.ui.CLASSES`, and let `bpy.context.scene.sculptr` supply
+  the real `poll()` context.
+- Gotcha: `graphify update .` refuses to shrink the graph ("new graph has 958 nodes but existing
+  graph.json has 965. Refusing to overwrite -- you may be missing chunk files from a previous
+  session.") and writes nothing. `--force` is documented for refactors that delete code, so a
+  code-adding change gets the stale graph reported, not a forced rebuild.
+
+## 2026-11-18 (session 2026-11-18-t4kx)
+
+- Gotcha: `row.label()` called N times draws N items SIDE BY SIDE inside that one row, each
+  clipped to its own column and each carrying its own `icon`; that is what made a hand-wrapped
+  notice (`_wrap_text`, width 46) read as three truncated bubbles on one line. `box.label()` and
+  `column.label()` are different -- those mint a fresh row per call, so a wrapped loop over a box
+  already gives one row per line, but N rows each with its own icon still reads as N messages.
+  WHY the binding rule is stronger than either fix: one message must be ONE label, because a
+  Blender row stretches to its label (the long `Paused -- resume when ready: ...` status row
+  proves it) and an icon belongs to a message, not to a line. Final rule for this repo: no panel
+  message is split before it is drawn, and `_wrap_text` is deleted rather than kept for re-use.
+  Regression coverage: `tests/test_ui_notice_rows.py` scans `sculptr/ui.py` for a `for` loop that
+  draws its own loop variable through `.label(...)` (T-029, then T-030 for the split itself).
+- Gotcha: `title.label(name); title.label(size)` on one model-card row is deliberate, so a
+  "no shared row may carry two labels" rule would be wrong; the binding shape is a message
+  split into several labels.
+- Gotcha: an empty transfer-card reason must print nothing; the old `for line in _wrap_text(reason)`
+  loop gave that for free (empty tuple), so the single-label form needs `if reason:`.
+- Gotcha: a panel label never widens its drawer, and Blender replaces the middle of a label
+  that overflows the row with "...", which reads as a split message even when it is one label.
+  WHY it matters for T-030's "one message = one label" rule: the row width comes from the other
+  rows (here the "Change" / "Open in Explorer" button pair, ~470 px in the Folder panel,
+  ~6.3 px/glyph, so ~70-75 glyphs), and capacity is per panel -- the Models tab fits 86-char
+  status text because its name+size row is wider. Final rule: one message = one label AND the
+  label text fits the drawer. The Folder hint was shortened to 64 chars accordingly. Coverage:
+  `MAX_LABEL_CHARS = 70` in `tests/test_ui_notice_rows.py` (T-031).
+- Update superseding p9mc's note: `graphify update .` no longer refuses on this tree -- it rebuilt
+  to 971 nodes / 2603 edges / 47 communities after the first ui.py edit, then 964 / 2588 / 45 once
+  `_wrap_text` was deleted.
